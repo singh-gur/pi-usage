@@ -21,8 +21,8 @@ footer indicator.
 
 ## Commands
 
-No package or scripts exist yet; they are created in Phase 1 per PLAN.md.
-Once present, use these (pnpm 11.1.2, recorded in `packageManager`):
+Commands (pnpm 11.1.2, recorded in `packageManager`; build-script and run-check
+decisions live in `pnpm-workspace.yaml`):
 
 - `pnpm install --frozen-lockfile` — reproducible installs; commit `pnpm-lock.yaml`.
 - `pnpm test` — `node --test test/*.test.ts`, synthetic data only.

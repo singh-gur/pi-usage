@@ -4,7 +4,7 @@
 
 Build an independently implemented, read-only Pi package for provider-reported subscription quota and OpenRouter key allowance. `/usage` refreshes all configured supported providers; an additive footer indicator shows remaining allowance for the active provider, reset countdown, and freshness.
 
-This plan is user-approved. Implementation has not started. Approval to save this plan does not authorize installation changes, commits, checkpoint tags, pushes, or publication.
+This plan is user-approved. Phase 1 is implemented and user-accepted; phases 2–4 are pending. Approval to save this plan does not authorize installation changes, commits, checkpoint tags, pushes, or publication.
 
 ## Planning Profile
 
@@ -224,7 +224,7 @@ Use a shared branch with checkpoint tags. No parallel writers are needed.
 ### Phase 1 — Working command with OpenCode Go and OpenRouter
 
 - **Objective:** Deliver a useful, installable two-provider quota command with the shared safety boundaries.
-- **Status:** Not Started
+- **Status:** Complete (accepted 2026-09-05)
 - **Complexity:** Medium
 - **Estimated Time:** 60–90 minutes
 - **Prerequisites:** Approved plan; implementation authorization.
@@ -242,13 +242,20 @@ Use a shared branch with checkpoint tags. No parallel writers are needed.
 
 #### Implementation Tasks
 
-- [ ] **Package setup:** Declare ESM, the Node requirement, and `pi.extensions: ["./src/index.ts"]`; explicitly allowlist shipped runtime files. Use pnpm to resolve dependencies and produce `pnpm-lock.yaml`. Done when Pi can discover the entry point and package inspection excludes dependencies, private data, and test-only artifacts from runtime contents.
-- [ ] **Development commands:** Provide `pnpm test` using `node --test test/*.test.ts`, `pnpm run typecheck` using `tsc --noEmit`, and `pnpm run pack:check` using `pnpm pack --dry-run` (verified in pnpm 11.1.2). Done when commands are runnable without authenticated model calls.
-- [ ] **`src/types.ts`:** Define the normalized result contract described above, including independent windows/groups, unit semantics, capture time, and explicit error/partial states. Done when both initial adapters and the UI consume the same representation without provider-specific parsing in the UI.
-- [ ] **`src/auth.ts` and `src/http.ts`:** Implement Pi-only auth resolution, exact official-origin validation, limited headers, redirect rejection, bounded bodies, timeouts, and sanitized errors. Done when mocked safety tests prove no credential is sent to an unapproved origin and late work is discarded.
-- [ ] **Initial adapters:** Implement the OpenCode Go and OpenRouter contracts. Done when valid zero usage, all Go windows, subscription errors, finite spending caps, and uncapped OpenRouter keys render with correct semantics.
-- [ ] **`src/index.ts` and `src/ui.ts`:** Register `/usage` and render a dismissible, scrollable view with independent loading/results/errors. Do not add automatic polling yet. Done when one slow or failing provider does not hide another provider's result and closing the view restores normal interaction.
-- [ ] **Tests:** Add small synthetic tests for valid payloads, missing/null fields, zero usage, malformed responses, missing auth, redirects, oversized bodies, and timeouts. Done when each meaningful branch has a runnable regression check without credentials or live APIs.
+- [x] **Package setup:** Declare ESM, the Node requirement, and `pi.extensions: ["./src/index.ts"]`; explicitly allowlist shipped runtime files. Use pnpm to resolve dependencies and produce `pnpm-lock.yaml`. Done when Pi can discover the entry point and package inspection excludes dependencies, private data, and test-only artifacts from runtime contents.
+  - `package.json` created (ESM, `engines.node >=24.16.0`, `pi.extensions`, `files: ["src"]`); `pnpm-lock.yaml` generated and committed to the branch; `pnpm run pack:check` lists only `package.json`, `README.md`, and `src/*.ts`.
+- [x] **Development commands:** Provide `pnpm test` using `node --test test/*.test.ts`, `pnpm run typecheck` using `tsc --noEmit`, and `pnpm run pack:check` using `pnpm pack --dry-run` (verified in pnpm 11.1.2). Done when commands are runnable without authenticated model calls.
+  - All three pass with no model calls. Tests run TypeScript directly via Node 24 type stripping; `tsconfig.json` uses `allowImportingTsExtensions` + `noEmit`.
+- [x] **`src/types.ts`:** Define the normalized result contract described above, including independent windows/groups, unit semantics, capture time, and explicit error/partial states. Done when both initial adapters and the UI consume the same representation without provider-specific parsing in the UI.
+  - `ProviderUsage`/`QuotaWindow`/`ProviderError` contract plus `QuotaAdapter` adapter interface; both adapters and `src/ui.ts` consume it with no provider-specific parsing in the UI.
+- [x] **`src/auth.ts` and `src/http.ts`:** Implement Pi-only auth resolution, exact official-origin validation, limited headers, redirect rejection, bounded bodies, timeouts, and sanitized errors. Done when mocked safety tests prove no credential is sent to an unapproved origin and late work is discarded.
+  - Auth resolves only through `ctx.modelRegistry` (`getProviderAuthStatus`/`getProviderAuth`/`getProvider`), refuses custom provider/auth base-URL overrides, and detects OAuth provenance via `source: "OAuth"`. HTTP is GET-only, `redirect: "error"`, 10s/128 KiB bounds, sanitized errors; per-provider 30s bound discards late work. Covered by mocked tests in `test/runtime.test.ts`.
+- [x] **Initial adapters:** Implement the OpenCode Go and OpenRouter contracts. Done when valid zero usage, all Go windows, subscription errors, finite spending caps, and uncapped OpenRouter keys render with correct semantics.
+  - `src/providers/opencode-go.ts` (rolling/weekly/monthly, `ok`/`rate-limited`, consumed `percent`, returned `resetsAt`, 401/403-EntitlementError mapping) and `src/providers/openrouter.ts` (USD limit/remaining/usage, null cap ≠ unlimited, `limit_reset` as cadence only, no labels/user ids surfaced).
+- [x] **`src/index.ts` and `src/ui.ts`:** Register `/usage` and render a dismissible, scrollable view with independent loading/results/errors. Do not add automatic polling yet. Done when one slow or failing provider does not hide another provider's result and closing the view restores normal interaction.
+  - `/usage` registered (no LLM call); non-TUI modes stay silent; per-provider sections update independently; escape/q/enter closes and aborts package-owned work. No polling/timers exist.
+- [x] **Tests:** Add small synthetic tests for valid payloads, missing/null fields, zero usage, malformed responses, missing auth, redirects, oversized bodies, and timeouts. Done when each meaningful branch has a runnable regression check without credentials or live APIs.
+  - 54 tests across `test/providers.test.ts`, `test/runtime.test.ts`, `test/extension.test.ts`; all pass.
 
 #### Execution Tracking Rules
 
@@ -256,11 +263,11 @@ Apply the shared rules. Record any changes to the shared result contract before 
 
 #### Verification
 
-- [ ] `pnpm test` passes using only synthetic/mock data.
-- [ ] `pnpm run typecheck` passes without emitting runtime files.
-- [ ] `pnpm run pack:check` lists the intended entry point/runtime files and no sensitive or unintended content.
-- [ ] Mocked command checks demonstrate independent provider completion and explicit no-configuration/error states.
-- [ ] User reviews the working command; any local installation used for review is separately authorized.
+- [x] `pnpm test` passes using only synthetic/mock data. (54/54 pass)
+- [x] `pnpm run typecheck` passes without emitting runtime files.
+- [x] `pnpm run pack:check` lists the intended entry point/runtime files and no sensitive or unintended content.
+- [x] Mocked command checks demonstrate independent provider completion and explicit no-configuration/error states.
+- [x] User reviews the working command; any local installation used for review is separately authorized. (Reviewed via `pi -e ./src/index.ts`; user confirmed success. Checkpoint commit + tag `pi-usage-phase-1` authorized and completed.)
 
 #### Completion Gate
 
@@ -272,7 +279,14 @@ Installable two-provider command, shared safety/result contracts, and runnable v
 
 #### Execution Notes
 
-None.
+Phase 1 implementation complete (2026-09-05). Recorded deviations and decisions:
+
+- `pnpm-workspace.yaml` was added (not in the original file list): pnpm 11 reads build-script allow/ignore decisions and `verifyDepsBeforeRun` from there, not `package.json#pnpm`. It records `ignoredBuiltDependencies` for transitive dev-only toolchain deps (`@google/genai`, `esbuild`, `protobufjs` — none needed for typecheck/tests) and disables the run-time deps re-check, without which `pnpm install` exits non-zero on the ignored-builds notice.
+- `@types/node` added as a devDependency (typecheck requirement; not shipped).
+- Tests run `.ts` files directly through Node 24 type stripping; no test framework introduced.
+- OpenCode Go response shape verified against the cited `anomalyco/opencode` console source (window statuses, consumed `percent`, ISO `resetsAt`, 401 `AuthError` / 403 `EntitlementError` envelopes). OpenRouter shape verified against the cited current-key API docs (`data.limit`, `limit_remaining`, `limit_reset` cadence string, `usage`).
+- `/usage` is a no-op outside `ctx.mode === "tui"`; RPC/print/JSON behavior is formalized in phase 4 per plan.
+- Residual limitation (intentional): `canceled` error entries may be written to the in-memory snapshot after the view closes; nothing renders them in phase 1.
 
 ### Phase 2 — Codex, Kimi, and Z.ai
 

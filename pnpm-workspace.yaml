@@ -1,0 +1,14 @@
+allowBuilds:
+  '@google/genai': set this to true or false
+  esbuild: set this to true or false
+  protobufjs: set this to true or false
+# pnpm 11 config (build-script decisions live here, not package.json).
+# Transitive deps of the Pi dev toolchain; their postinstall builds are not
+# needed for typecheck/tests in this repo.
+ignoredBuiltDependencies:
+  - "@google/genai"
+  - esbuild
+  - protobufjs
+# pnpm's run-time dependency re-check spawns an install that treats the
+# ignored-builds notice as fatal; deps are managed explicitly here.
+verifyDepsBeforeRun: false
