@@ -14,8 +14,8 @@ footer indicator.
   truth for scope, contracts, phases, and verification. Do not implement
   outside approved scope; do not widen compatibility claims beyond the
   inspected Pi 0.85.1 API.
-- Phase order is strictly sequential: Phase 1 → 2 → 3 → 4. Start dependent
-  work from the preceding accepted checkpoint.
+- Phase order is strictly sequential: Phase 1 → 2 → `/usage` visual refinement
+  → 3 → 4. Start dependent work from the preceding accepted checkpoint.
 - Scope changes go back through the plan workflow and require user approval
   before any code or tracking reflects them.
 
@@ -64,14 +64,15 @@ with reality throughout every work session. Approved scope lives in
 to match board activity, and never treat board state as phase approval.
 
 The plan has already been imported to Kaneo. Workspace: **Home Projects**;
-project: **Pi Usage** (`fu8gwyw0lnnjl67qz5314gw5`). One task per phase,
-with the plan's implementation steps as a checklist in each task description
-and a plan reference (repo, `PLAN.md` @ b0edcbe, phase heading):
+project: **Pi Usage** (`fu8gwyw0lnnjl67qz5314gw5`). One task per phase plus
+the approved blocking pre-phase-3 UI refinement, with implementation steps as
+a checklist in each task description and a plan reference:
 
 | Task | ID | Number |
 | --- | --- | --- |
 | Phase 1 — Working command with OpenCode Go and OpenRouter | `ewh2cdm81664ejrjozkvvkgn` | #1 |
 | Phase 2 — Codex, Kimi, and Z.ai | `blyhyibkuiybaon7e054eemg` | #2 |
+| Pre-Phase 3 — `/usage` visual refinement | `l2gmrcwc5c2r8acgsb06s68l` | #5 |
 | Phase 3 — Grok subscription billing | `mj3yks2izvt70btmyvge73i4` | #3 |
 | Phase 4 — Automatic footer and lifecycle hardening | `e9t8jlijlktz0n8zvctlp19d` | #4 |
 

@@ -137,10 +137,14 @@ test("extension: independent provider completion; failure does not hide success"
   await settle();
 
   assert.equal(handles.length, 1);
-  const lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(lines.includes("OpenCode Go — Coding plan allowance"), "go provider header shown");
-  assert.ok(/12\.5% used/.test(lines), "go usage rendered");
-  assert.ok(lines.includes("OpenRouter — Key spending allowance"), "openrouter header shown");
+  let lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(lines.includes("[OpenCode Go]"), "go tab shown");
+  assert.ok(lines.includes("Coding plan allowance"), "go provider body shown");
+  assert.ok(/87\.5% left/.test(lines), "go remaining allowance rendered");
+  assert.ok(!lines.includes("Credentials were rejected by OpenRouter"), "inactive provider body is hidden");
+  handles[0]!.component.handleInput("\x1b[C"); // next tab
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(lines.includes("Key spending allowance"), "openrouter provider body shown");
   assert.ok(/auth: Credentials were rejected by OpenRouter/.test(lines), "openrouter error rendered");
   assert.ok(harness.fetchCalls.some((c) => c.url === "https://opencode.ai/zen/go/v1/usage" && c.headers.authorization === "Bearer go-key"));
   assert.ok(harness.fetchCalls.some((c) => c.url === "https://openrouter.ai/api/v1/key" && c.headers.authorization === "Bearer or-key"));
@@ -168,13 +172,16 @@ test("extension: shows loading state before providers respond, then updates", as
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
   await settle();
   let lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(lines.includes("refreshing…"), "slow provider still loading");
-  assert.ok(/\$25\.50 used/.test(lines), "fast provider already rendered");
+  assert.ok(lines.includes("refreshing…"), "slow active provider still loading");
+  handles[0]!.component.handleInput("\x1b[C"); // OpenRouter tab
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/\$25\.50 used/.test(lines), "fast provider already rendered in its tab");
+  handles[0]!.component.handleInput("\x1b[D"); // OpenCode Go tab
 
   releaseGo?.();
   await settle();
   lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(/12\.5% used/.test(lines), "slow provider rendered after release");
+  assert.ok(/87\.5% left/.test(lines), "slow provider rendered after release");
   assert.ok(!lines.includes("refreshing…"), "no stale loading state");
 
   handles[0]!.done(undefined);
@@ -193,7 +200,7 @@ test("extension: unconfigured providers are omitted from the view entirely", asy
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
   await settle();
   const lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(/12\.5% used/.test(lines), "configured provider still fetched");
+  assert.ok(/87\.5% left/.test(lines), "configured provider still fetched");
   for (const absent of ["OpenRouter", "Kimi", "Codex", "Z.AI"]) {
     assert.ok(!lines.includes(absent), `${absent} must not appear`);
   }
@@ -277,18 +284,79 @@ function goUsage(): ProviderUsage {
   };
 }
 
-test("view: renders provider sections with windows, reset info, and color-paired labels", () => {
+test("view: renders provider sections with bars, reset info, and text-paired status", () => {
   const entries: UsageEntry[] = [
     { name: "OpenCode Go", usage: goUsage() },
     { name: "OpenRouter" },
   ];
   const lines = renderUsageLines(entries, IDENTITY_THEME);
   const text = lines.join("\n");
-  assert.ok(text.includes("OpenCode Go — Coding plan allowance"));
-  assert.ok(/12\.5% used/.test(text));
-  assert.ok(/resets in 2h/.test(text));
+  assert.ok(text.includes("OpenCode Go\n  Coding plan allowance — updated just now"));
+  assert.ok(/█+░+  87\.5% left/.test(text));
+  assert.ok(/Resets in 2h/.test(text));
   assert.ok(text.includes("[rate-limited]"));
   assert.ok(text.includes("refreshing…"));
+});
+
+test("view: derives same-unit bars and leaves unknown ratios text-only", () => {
+  const usage: ProviderUsage = {
+    providerId: "p",
+    providerName: "P",
+    domainLabel: "Allowance",
+    capturedAt: Date.now(),
+    windows: [
+      { label: "credits", used: { value: 25, unit: "credits" }, remaining: { value: 75, unit: "credits" }, limit: { value: 100, unit: "credits" } },
+      { label: "uncapped", used: { value: 2, unit: "USD" } },
+    ],
+  };
+  const lines = renderUsageLines([{ name: "P", usage }], IDENTITY_THEME, 60);
+  const text = lines.join("\n");
+  assert.match(text, /█+░+  75 \/ 100 credits left/);
+  const unknownStart = lines.indexOf("  uncapped");
+  assert.equal(lines[unknownStart + 1], "  $2 used");
+  assert.ok(!lines[unknownStart + 1]!.includes("█"), "unknown ratio has no bar");
+});
+
+test("view: tabs isolate providers, navigate, and keep the active tab visible", () => {
+  const first = goUsage();
+  first.domainLabel = "First allowance";
+  const second = goUsage();
+  second.domainLabel = "Second allowance";
+  second.windows = second.windows.slice(0, 1); // shorter tab body
+  let repaints = 0;
+  const view = new UsageView({
+    theme: IDENTITY_THEME,
+    getEntries: () => [
+      { name: "Provider one long", usage: first },
+      { name: "Provider two long", usage: second },
+    ],
+    onClose: () => {},
+    requestRender: () => repaints++,
+    maxRows: 4,
+  });
+
+  const firstHeight = view.render(80).length;
+  let text = view.render(80).join("\n");
+  assert.ok(text.includes("[Provider one long]"));
+  assert.ok(text.includes("Provider two long"));
+  assert.ok(text.includes("First allowance"));
+  assert.ok(!text.includes("Second allowance"));
+
+  view.handleInput("\x1b[B"); // scroll the first provider
+  view.handleInput("l"); // switching tabs resets the body scroll
+  text = view.render(24).join("\n");
+  assert.ok(text.includes("[Provider two long]"), "narrow fallback keeps the active tab visible");
+  assert.ok(text.includes("Second allowance"));
+  assert.ok(!text.includes("First allowance"));
+  assert.equal(view.render(80).length, firstHeight, "shorter provider keeps the tallest tab height");
+
+  view.handleInput("h");
+  assert.ok(view.render(80).join("\n").includes("First allowance"));
+  view.handleInput("\x1b[Z"); // shift-tab wraps backward
+  assert.ok(view.render(80).join("\n").includes("Second allowance"));
+  view.handleInput("\t"); // tab wraps forward
+  assert.ok(view.render(80).join("\n").includes("First allowance"));
+  assert.equal(repaints, 5);
 });
 
 test("view: scroll clamps at both ends and follows input", () => {
@@ -311,17 +379,15 @@ test("view: scroll clamps at both ends and follows input", () => {
   assert.ok(full > 3, "content must exceed the viewport for scrolling");
   const first = view.render(80);
   assert.equal(first.length, 4, "3 content rows + hint line");
-  assert.ok(first[0]!.startsWith("P —"), "starts at the provider header");
+  assert.equal(first[0], "[P]", "starts at the provider tab");
   view.handleInput("\x1b[B"); // down
-  view.handleInput("\x1b[B");
-  view.handleInput("\x1b[B"); // beyond end
   const scrolled = view.render(80);
   assert.equal(scrolled.length, 4);
-  assert.ok(scrolled[0]!.trimStart().startsWith("w"), "view scrolled into window lines");;
+  assert.ok(scrolled[1]!.trimStart().startsWith("w"), "view scrolled into window lines while tabs stay fixed");
   view.handleInput("\x1b[H"); // home
-  assert.ok(view.render(80)[0]!.startsWith("P —"), "home returns to the top");
+  assert.ok(view.render(80)[1]!.includes("Coding plan allowance"), "home returns the body to the top");
   view.handleInput("\x1b[A"); // up at top stays
-  assert.ok(view.render(80)[0]!.startsWith("P —"), "top clamp holds");
+  assert.ok(view.render(80)[1]!.includes("Coding plan allowance"), "top clamp holds");
   view.handleInput("q");
   assert.ok(closed);
 });
@@ -409,18 +475,25 @@ test("extension: five providers render independently without conflation", async 
   await settle();
 
   let lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(lines.includes("OpenCode Go — Coding plan allowance"));
-  assert.ok(/12\.5% used/.test(lines));
-  assert.ok(/\$25\.50 used/.test(lines));
-  assert.ok(/primary \(shared\) · 5h/.test(lines) && /42% used/.test(lines));
+  assert.ok(lines.includes("[OpenCode Go]"));
+  assert.ok(lines.includes("Coding plan allowance"));
+  assert.ok(/87\.5% left/.test(lines));
 
-  // Remaining providers live below the 20-row viewport; scroll to them.
-  handles[0]!.component.handleInput("\x1b[6~"); // page down
+  handles[0]!.component.handleInput("\x1b[C"); // OpenRouter
   lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(/Kimi For Coding — Coding plan allowance/.test(lines));
+  assert.ok(/\$25\.50 used/.test(lines));
+
+  handles[0]!.component.handleInput("\x1b[C"); // Codex
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/primary \(shared\) · 5h/.test(lines) && /58% left/.test(lines));
+
+  handles[0]!.component.handleInput("\x1b[C"); // Kimi
+  lines = handles[0]!.component.render(100).join("\n");
   assert.ok(/5h window/.test(lines));
-  assert.ok(/Z\.AI — Coding plan allowance/.test(lines));
-  assert.ok(/5-hour/.test(lines) && /25% used/.test(lines));
+
+  handles[0]!.component.handleInput("\x1b[C"); // Z.AI
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/5-hour/.test(lines) && /75% left/.test(lines));
 
   // Codex request used the runtime-derived account header.
   const codexCall = harness.fetchCalls.find((c) => c.url.includes("chatgpt.com"));
@@ -451,9 +524,11 @@ test("extension: codex without OAuth provenance shows an error, others unaffecte
 
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
   await settle();
-  const lines = handles[0]!.component.render(100).join("\n");
+  let lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/87\.5% left/.test(lines), "other providers unaffected");
+  handles[0]!.component.handleInput("\x1b[C"); // Codex tab
+  lines = handles[0]!.component.render(100).join("\n");
   assert.ok(/auth: Codex quota requires subscription OAuth credentials/.test(lines));
-  assert.ok(/12\.5% used/.test(lines), "other providers unaffected");
   assert.ok(!harness.fetchCalls.some((c) => c.url.includes("chatgpt.com")), "no codex request issued");
 
   handles[0]!.done(undefined);
@@ -487,7 +562,7 @@ test("extension: partial-data notice renders for malformed optional windows", as
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
   await settle();
   const lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(/12\.5% used/.test(lines), "valid window still visible");
+  assert.ok(/87\.5% left/.test(lines), "valid window still visible");
   assert.ok(/partial data: 1 usage window/.test(lines), "partial notice rendered");
 
   handles[0]!.done(undefined);

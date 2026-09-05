@@ -4,7 +4,7 @@
 
 Build an independently implemented, read-only Pi package for provider-reported subscription quota and OpenRouter key allowance. `/usage` refreshes all configured supported providers; an additive footer indicator shows remaining allowance for the active provider, reset countdown, and freshness.
 
-This plan is user-approved. Phases 1–2 are implemented and user-accepted; phases 3–4 are pending. Approval to save this plan does not authorize installation changes, commits, checkpoint tags, pushes, or publication.
+This plan is user-approved. Phases 1–2 and the pre-phase-3 UI refinement are implemented and user-accepted; phases 3–4 are pending. Approval to save this plan does not authorize installation changes, commits, checkpoint tags, pushes, or publication.
 
 ## Planning Profile
 
@@ -41,6 +41,7 @@ This plan is user-approved. Phases 1–2 are implemented and user-accepted; phas
 - Read-only undocumented provider endpoints are acceptable with validation and explicit errors.
 - Independent implementation; existing projects are protocol references, not a codebase to fork or copy.
 - Local installation for development and Git-based Pi package installation for use.
+- A responsive, tabbed, reference-style `/usage` dashboard: one configured provider per tab; Pi-themed headings; consumed/remaining bars where a ratio is safe; remaining values at right; reset details below; and retained domain, freshness, exact-value, partial, and error semantics.
 
 ### Out of scope
 
@@ -204,7 +205,7 @@ All quota/identity/billing calls made by this package are GET requests to fixed 
 
 ## Phase Strategy
 
-Sequential checkpoints: working two-provider command, five-provider command, six-provider command, then automatic footer/lifecycle integration. These boundaries allow protocol and security review before additional providers or background networking are introduced.
+Sequential checkpoints: working two-provider command, five-provider command, approved `/usage` visual refinement, six-provider command, then automatic footer/lifecycle integration. These boundaries allow protocol, UI, and security review before additional providers or background networking are introduced.
 
 Use a shared branch with checkpoint tags. No parallel writers are needed.
 
@@ -351,6 +352,55 @@ Phase 2 implementation complete (2026-09-05). Decisions:
 - **Review fix (user-reported):** with five providers the view overflowed and scrolling did not repaint. Two root causes in `src/ui.ts`: the custom component replaced the editor slot but used a hardcoded 20-row viewport, and `handleInput` never called `tui.requestRender()` after offset changes. Fixed by deriving the viewport from `tui.terminal.rows` (reserving 4 chrome rows) and requesting a repaint on every handled key; a scroll-position hint line (`3-22 of 41`) was added. Regression tests cover repaint-on-scroll and terminal-height-derived viewport height.
 - **Review decision (user-requested):** providers without credentials configured in Pi are now omitted from the /usage view entirely instead of showing a `not configured` row. The command filters on `getProviderAuthStatus().configured` before creating entries; when nothing is configured it shows an info notification instead of an empty view. The `not-configured` error kind remains as a safety net for status/resolution races, and configured-but-broken providers still show their real error states.
 
+### Pre-Phase 3 — `/usage` visual refinement
+
+- **Objective:** Replace dense quota rows with a responsive, one-provider-per-tab terminal dashboard without changing normalized provider semantics.
+- **Status:** Complete (accepted 2026-09-05)
+- **Complexity:** Low
+- **Prerequisites:** User-accepted phase 2.
+- **Context:** The five-provider command is correct but hard to scan. This refinement is a blocking presentation checkpoint before Grok adds another provider.
+
+#### Files
+
+| Path | Action | Purpose |
+| --- | --- | --- |
+| `src/ui.ts` | Modify | Responsive bar-based quota rendering |
+| `test/extension.test.ts` | Modify | Rendering, derivation, unknown-ratio, and width regressions |
+| `AGENTS.md`, `PLAN.md` | Modify | Keep workflow and execution scope aligned |
+
+#### Implementation Tasks
+
+- [x] **Provider hierarchy:** Use Pi theme tokens for provider headings while retaining domain and capture-age context. Done when provider sections are visually distinct without hardcoded colors.
+- [x] **Quota bars:** Render consumed/remaining bars when `usedPercent` is valid or a ratio can be safely derived from same-unit limit/used/remaining values. Clamp rendering to 0–100%; never mutate normalized values or invent an unknown ratio.
+- [x] **Window details:** Show remaining percentage or amount at right, reset timing below, exact used/remaining/cap values where available, and explicit rate-limit/partial/error text.
+- [x] **Responsive behavior:** Size bars from the available component width, retain scroll/navigation behavior, and keep every rendered line within the terminal width.
+- [x] **Provider tabs:** Show one configured provider at a time with a persistent responsive tab strip. Left/right, `h`/`l`, and tab keys switch providers; vertical/page keys scroll only the active provider and switching resets its scroll position.
+- [x] **Consistent tab height:** Pad shorter provider bodies to the tallest configured provider body, capped by the available viewport, so switching tabs does not move surrounding UI.
+- [x] **Tests:** Cover tab switching, provider isolation, consistent height, responsive tab fallback, existing bar cases, reset text, scrolling, and narrow widths.
+
+#### Verification
+
+- [x] `pnpm test`, `pnpm run typecheck`, and `pnpm run pack:check` pass after the consistent-height amendment. (94/94 tests; intended package contents only.)
+- [x] No provider parser, authentication, endpoint, or normalized contract changes are introduced.
+- [x] User reviews the refreshed `/usage` panel and explicitly accepts the refinement. (Accepted 2026-09-05.)
+
+#### Completion Gate
+
+Automated checks and user confirmation of the visual result. Kaneo task `l2gmrcwc5c2r8acgsb06s68l` blocks phase 3 until this gate is met.
+
+#### Execution Notes
+
+- User selected the balanced direction: responsive reference-style bars while preserving domain, freshness, exact values, and explicit error semantics.
+- The filled segment represents consumed quota, matching the reference image. Unknown ratios remain text-only rather than displaying a misleading empty/full track.
+- Implementation uses `accent`, `dim`, `success`, and `warning` Pi theme tokens rather than hardcoded colors. Bars cap at 42 columns and shrink or stack their summary at narrow widths.
+- Initial bar-layout verification passed: `pnpm test` (93/93), `pnpm run typecheck`, `pnpm run pack:check`, and `git diff --check`.
+- User requested one configured provider per tab before visual acceptance. The existing refinement task returned to in-progress; no new Kaneo task was needed.
+- Tab implementation keeps the strip fixed while only the active provider body scrolls. Wide terminals show every configured tab; narrow terminals show the active tab with its position. Left/right, `h`/`l`, Tab, and Shift-Tab cycle providers and reset body scroll.
+- Tab-amendment verification passed: `pnpm test` (94/94), `pnpm run typecheck`, `pnpm run pack:check`, and `git diff --check`.
+- User requested consistent panel height across tabs before visual acceptance. The existing refinement task returned to in-progress.
+- Shorter active bodies now receive blank rows up to the tallest configured provider body, capped by the viewport. Verification passed: `pnpm test` (94/94), `pnpm run typecheck`, `pnpm run pack:check`, and `git diff --check`.
+- User visually confirmed the responsive bars, provider tabs, and consistent tab height and accepted the refinement on 2026-09-05.
+
 ### Phase 3 — Grok subscription billing
 
 - **Objective:** Complete six-provider support with accurately labelled Grok coding-credit allowance.
@@ -457,7 +507,7 @@ None.
 
 ## Phase Dependencies
 
-`Phase 1 → Phase 2 → Phase 3 → Phase 4`
+`Phase 1 → Phase 2 → /usage visual refinement → Phase 3 → Phase 4`
 
 Do not start dependent work before the preceding phase is user-accepted. No parallel writer lanes are prescribed.
 

@@ -4,7 +4,7 @@
  * The UI consumes only the normalized ProviderUsage contract; no
  * provider-specific parsing happens here. Color is always paired with text.
  */
-import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ProviderUsage, QuotaWindow } from "./types.ts";
 
 /** Structural theme slice; the real Pi theme satisfies this. */
@@ -42,31 +42,89 @@ function formatDuration(ms: number): string {
 }
 
 function formatAge(ms: number): string {
-  if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s ago`;
+  if (ms < 60_000) return "just now";
   return `${formatDuration(ms)} ago`;
 }
 
-function windowLine(window: QuotaWindow, theme: ThemeLike): string {
-  const parts: string[] = [window.label.padEnd(9)];
-  if (window.usedPercent !== undefined) parts.push(`${formatPercent(window.usedPercent)} used`);
-  if (window.used) parts.push(`${formatQuotaValue(window.used.value, window.used.unit)} used`);
-  if (window.remaining) {
-    parts.push(`${formatQuotaValue(window.remaining.value, window.remaining.unit)} remaining`);
+function sameUnit(a: { unit: string } | undefined, b: { unit: string } | undefined): boolean {
+  return a !== undefined && b !== undefined && a.unit === b.unit;
+}
+
+function usedPercent(window: QuotaWindow): number | undefined {
+  let value = window.usedPercent;
+  if (value === undefined && window.limit && window.limit.value > 0) {
+    if (sameUnit(window.used, window.limit) && window.used!.value >= 0) {
+      value = (window.used!.value / window.limit.value) * 100;
+    } else if (sameUnit(window.remaining, window.limit) && window.remaining!.value >= 0) {
+      value = 100 - (window.remaining!.value / window.limit.value) * 100;
+    }
   }
-  if (window.limit) parts.push(`cap ${formatQuotaValue(window.limit.value, window.limit.unit)}`);
+  return value === undefined || !Number.isFinite(value) ? undefined : Math.max(0, Math.min(100, value));
+}
+
+function remainingSummary(window: QuotaWindow, consumed: number): { text: string; includesLimit: boolean } {
+  if (window.remaining) {
+    if (sameUnit(window.remaining, window.limit)) {
+      const unit = window.remaining.unit;
+      const values = unit === "USD"
+        ? `${formatQuotaValue(window.remaining.value, unit)} / ${formatQuotaValue(window.limit!.value, unit)}`
+        : `${formatNumber(window.remaining.value)} / ${formatNumber(window.limit!.value)} ${unit}`;
+      return { text: `${values} left`, includesLimit: true };
+    }
+    return { text: `${formatQuotaValue(window.remaining.value, window.remaining.unit)} left`, includesLimit: false };
+  }
+  return { text: `${formatPercent(100 - consumed)} left`, includesLimit: false };
+}
+
+function quotaBar(width: number, consumed: number, theme: ThemeLike): string {
+  const filled = consumed > 0 ? Math.max(1, Math.round(width * consumed / 100)) : 0;
+  return theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(width - filled));
+}
+
+function detailParts(window: QuotaWindow, includesLimit: boolean): string[] {
+  const parts: string[] = [];
   if (window.resetsAt !== undefined) {
     parts.push(
       window.resetsAt > Date.now()
-        ? `resets in ${formatDuration(window.resetsAt - Date.now())}`
-        : "reset time passed",
+        ? `Resets in ${formatDuration(window.resetsAt - Date.now())}`
+        : "Reset time passed",
     );
   }
-  if (window.resetCadence) parts.push(`resets ${window.resetCadence}`);
-  let line = "  " + parts.join(" · ");
-  if (window.status === "rate-limited") {
-    line += " " + theme.fg("warning", "[rate-limited]");
+  if (window.resetCadence) parts.push(`Resets ${window.resetCadence}`);
+  if (window.used) parts.push(`${formatQuotaValue(window.used.value, window.used.unit)} used`);
+  if (!includesLimit && window.limit) parts.push(`cap ${formatQuotaValue(window.limit.value, window.limit.unit)}`);
+  return parts;
+}
+
+function windowLines(window: QuotaWindow, theme: ThemeLike, width: number): string[] {
+  const status = window.status === "rate-limited" ? theme.fg("warning", " [rate-limited]") : "";
+  const lines = [`  ${window.label}${status}`];
+  const consumed = usedPercent(window);
+  if (consumed === undefined) {
+    const facts: string[] = [];
+    if (window.used) facts.push(`${formatQuotaValue(window.used.value, window.used.unit)} used`);
+    if (window.remaining) facts.push(`${formatQuotaValue(window.remaining.value, window.remaining.unit)} remaining`);
+    if (window.limit) facts.push(`cap ${formatQuotaValue(window.limit.value, window.limit.unit)}`);
+    if (window.resetsAt !== undefined) {
+      facts.push(window.resetsAt > Date.now() ? `Resets in ${formatDuration(window.resetsAt - Date.now())}` : "Reset time passed");
+    }
+    if (window.resetCadence) facts.push(`Resets ${window.resetCadence}`);
+    if (facts.length > 0) lines.push(theme.fg("dim", `  ${facts.join(" · ")}`));
+    return lines;
   }
-  return line;
+
+  const summary = remainingSummary(window, consumed);
+  const summaryColor = 100 - consumed <= 10 ? "warning" : "success";
+  const inlineWidth = Math.min(42, width - 4 - visibleWidth(summary.text));
+  if (inlineWidth >= 10) {
+    lines.push(`  ${quotaBar(inlineWidth, consumed, theme)}  ${theme.fg(summaryColor, summary.text)}`);
+  } else {
+    lines.push(`  ${quotaBar(Math.max(1, Math.min(42, width - 2)), consumed, theme)}`);
+    lines.push(theme.fg(summaryColor, `  ${summary.text}`));
+  }
+  const details = detailParts(window, summary.includesLimit);
+  if (details.length > 0) lines.push(theme.fg("dim", `  ${details.join(" · ")}`));
+  return lines;
 }
 
 const ERROR_COLOR: Record<string, string> = {
@@ -79,39 +137,44 @@ const ERROR_COLOR: Record<string, string> = {
   canceled: "dim",
 };
 
-function providerLines(entry: UsageEntry, theme: ThemeLike): string[] {
-  const header = theme.bold(entry.name);
+function providerLines(entry: UsageEntry, theme: ThemeLike, width: number, showName = true): string[] {
+  const lines = showName ? [theme.fg("accent", theme.bold(entry.name))] : [];
   const usage = entry.usage;
-  if (!usage) {
-    return [header, theme.fg("dim", "  refreshing…")];
-  }
-  const lines = [header];
-  const domain = `${entry.name} — ${usage.domainLabel}`;
-  lines[0] = theme.bold(domain);
-  lines.push(theme.fg("dim", `  captured ${formatAge(Date.now() - usage.capturedAt)}`));
+  if (!usage) return [...lines, theme.fg("dim", "  refreshing…")];
+
+  lines.push(theme.fg("dim", `  ${usage.domainLabel} — updated ${formatAge(Date.now() - usage.capturedAt)}`));
   if (usage.error) {
     const color = ERROR_COLOR[usage.error.kind] ?? "warning";
-    const label =
-      usage.error.kind === "not-configured" ? "not configured: " : `${usage.error.kind}: `;
+    const label = usage.error.kind === "not-configured" ? "not configured: " : `${usage.error.kind}: `;
     lines.push(theme.fg(color, `  ${label}${usage.error.message}`));
   }
-  for (const window of usage.windows) {
-    lines.push(windowLine(window, theme));
-  }
-  if (usage.partialNotice) {
-    lines.push(theme.fg("warning", `  partial data: ${usage.partialNotice}`));
-  }
+  for (const window of usage.windows) lines.push(...windowLines(window, theme, width));
+  if (usage.partialNotice) lines.push(theme.fg("warning", `  partial data: ${usage.partialNotice}`));
   return lines;
 }
 
 /** Pure rendering of the whole view body (without scroll chrome). */
-export function renderUsageLines(entries: UsageEntry[], theme: ThemeLike): string[] {
+export function renderUsageLines(entries: UsageEntry[], theme: ThemeLike, width = 80): string[] {
   const lines: string[] = [];
   for (let i = 0; i < entries.length; i++) {
     if (i > 0) lines.push("");
-    lines.push(...providerLines(entries[i]!, theme));
+    lines.push(...providerLines(entries[i]!, theme, width));
   }
   return lines;
+}
+
+function tabLine(entries: UsageEntry[], selected: number, theme: ThemeLike, width: number): string {
+  const tabs = entries.map((entry, index) =>
+    index === selected
+      ? theme.fg("accent", theme.bold(`[${entry.name}]`))
+      : theme.fg("dim", ` ${entry.name} `),
+  );
+  const full = tabs.join(" ");
+  if (visibleWidth(full) <= width) return full;
+  return truncateToWidth(
+    `${theme.fg("dim", "‹ ")}${tabs[selected]}${theme.fg("dim", ` ›  ${selected + 1}/${entries.length}`)}`,
+    width,
+  );
 }
 
 /**
@@ -120,6 +183,7 @@ export function renderUsageLines(entries: UsageEntry[], theme: ThemeLike): strin
  */
 export class UsageView {
   private offset = 0;
+  private selected = 0;
   private readonly theme: ThemeLike;
   private readonly getEntries: () => UsageEntry[];
   private readonly onClose: () => void;
@@ -159,7 +223,20 @@ export class UsageView {
       this.onClose();
       return;
     }
-    const rows = this.viewportRows();
+    const count = this.getEntries().length;
+    if (count > 1 && (matchesKey(data, Key.left) || matchesKey(data, Key.shift("tab")) || data === "h")) {
+      this.selected = (this.selected - 1 + count) % count;
+      this.offset = 0;
+      this.requestRender();
+      return;
+    }
+    if (count > 1 && (matchesKey(data, Key.right) || matchesKey(data, Key.tab) || data === "l")) {
+      this.selected = (this.selected + 1) % count;
+      this.offset = 0;
+      this.requestRender();
+      return;
+    }
+    const rows = Math.max(1, this.viewportRows() - 1);
     if (matchesKey(data, Key.up) || data === "k") {
       this.offset = Math.max(0, this.offset - 1);
     } else if (matchesKey(data, Key.down) || data === "j") {
@@ -180,16 +257,23 @@ export class UsageView {
   }
 
   render(width: number): string[] {
-    const body = renderUsageLines(this.getEntries(), this.theme);
-    const lines = [...body];
-    const rows = this.viewportRows();
-    const maxOffset = Math.max(0, lines.length - rows);
+    const entries = this.getEntries();
+    this.selected = Math.min(this.selected, Math.max(0, entries.length - 1));
+    const tabs = entries.length > 0 ? [tabLine(entries, this.selected, this.theme, width)] : [];
+    const bodies = entries.map((entry) => providerLines(entry, this.theme, width, false));
+    const body = bodies[this.selected] ?? [];
+    const availableRows = Math.max(1, this.viewportRows() - tabs.length);
+    const rows = Math.min(availableRows, Math.max(0, ...bodies.map((lines) => lines.length)));
+    const maxOffset = Math.max(0, body.length - rows);
     this.offset = Math.min(this.offset, maxOffset);
+    const visibleBody = body.slice(this.offset, this.offset + rows);
+    visibleBody.push(...Array<string>(rows - visibleBody.length).fill(""));
     const scrolled = maxOffset > 0 && this.offset > 0;
+    const tabHint = entries.length > 1 ? "←→/hl/tab tabs · " : "";
     const hint = scrolled
-      ? this.theme.fg("dim", `↑↓/jk scroll (${this.offset + 1}-${Math.min(this.offset + rows, lines.length)} of ${lines.length}) · esc close`)
-      : this.theme.fg("dim", "↑↓/jk scroll · pgup/pgdn · esc close");
-    const view = [...lines.slice(this.offset, this.offset + rows), hint];
+      ? this.theme.fg("dim", `${tabHint}↑↓/jk (${this.offset + 1}-${Math.min(this.offset + rows, body.length)} of ${body.length}) · esc close`)
+      : this.theme.fg("dim", `${tabHint}↑↓/jk scroll · esc close`);
+    const view = [...tabs, ...visibleBody, hint];
     return view.map((line) => truncateToWidth(line, width));
   }
 
