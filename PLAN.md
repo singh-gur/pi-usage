@@ -52,12 +52,12 @@ Historical token/cost analytics, databases, persistent quota history, standalone
 
 Use TypeScript, Node built-ins, Pi's public APIs, and native `node:test`. No runtime dependencies beyond the Pi packages required by the UI/integration. Do not bundle Pi itself.
 
-Target Pi 0.85.1 and Node 24.16+ initially. Declare Pi peer dependencies with `*` ranges as the inspected package documentation requires; develop and verify against the inspected Pi API. Do not imply untested compatibility with older Pi releases. Use the package manager for dependency changes and lockfile generation.
+Target Pi 0.85.1 and Node 24.16+ initially. Declare Pi peer dependencies with `*` ranges as the inspected package documentation requires; develop and verify against the inspected Pi API. Do not imply untested compatibility with older Pi releases. Use pnpm 11.1.2 for repository dependency changes, lockfile generation, and development commands; record it in the package's `packageManager` field. Commit `pnpm-lock.yaml` and use `pnpm install --frozen-lockfile` for reproducible installs. Pi's own package installation workflow remains unchanged.
 
 | Path | Action | Purpose |
 | --- | --- | --- |
 | `package.json` | Create | ESM package, Pi extension manifest, engine requirement, package allowlist, scripts, dependencies |
-| `package-lock.json` | Generate through npm | Reproducible dependency resolution |
+| `pnpm-lock.yaml` | Generate through pnpm | Reproducible dependency resolution |
 | `tsconfig.json` | Create | Type-check TypeScript without emitting runtime output |
 | `.gitignore` | Create | Exclude dependencies and generated local artifacts |
 | `src/index.ts` | Create | Extension factory, command, lifecycle integration |
@@ -234,7 +234,7 @@ Use a shared branch with checkpoint tags. No parallel writers are needed.
 
 | Path | Action | Purpose |
 | --- | --- | --- |
-| `package.json`, `package-lock.json`, `tsconfig.json`, `.gitignore` | Create/generate | Package and repeatable checks |
+| `package.json`, `pnpm-lock.yaml`, `tsconfig.json`, `.gitignore` | Create/generate | Package and repeatable checks |
 | `src/index.ts`, `src/types.ts`, `src/auth.ts`, `src/http.ts`, `src/ui.ts` | Create | Command, result model, safety, display |
 | `src/providers/opencode-go.ts`, `src/providers/openrouter.ts` | Create | Initial adapters |
 | `test/providers.test.ts`, `test/runtime.test.ts`, `test/extension.test.ts` | Create | Synthetic protocol and integration checks |
@@ -242,8 +242,8 @@ Use a shared branch with checkpoint tags. No parallel writers are needed.
 
 #### Implementation Tasks
 
-- [ ] **Package setup:** Declare ESM, the Node requirement, and `pi.extensions: ["./src/index.ts"]`; explicitly allowlist shipped runtime files. Use npm to resolve dependencies and produce the lockfile. Done when Pi can discover the entry point and package inspection excludes dependencies, private data, and test-only artifacts from runtime contents.
-- [ ] **Development commands:** Provide `npm test` using `node --test test/*.test.ts`, `npm run typecheck` using `tsc --noEmit`, and `npm run pack:check` using `npm pack --dry-run`. Done when commands are runnable without authenticated model calls.
+- [ ] **Package setup:** Declare ESM, the Node requirement, and `pi.extensions: ["./src/index.ts"]`; explicitly allowlist shipped runtime files. Use pnpm to resolve dependencies and produce `pnpm-lock.yaml`. Done when Pi can discover the entry point and package inspection excludes dependencies, private data, and test-only artifacts from runtime contents.
+- [ ] **Development commands:** Provide `pnpm test` using `node --test test/*.test.ts`, `pnpm run typecheck` using `tsc --noEmit`, and `pnpm run pack:check` using `pnpm pack --dry-run` (verified in pnpm 11.1.2). Done when commands are runnable without authenticated model calls.
 - [ ] **`src/types.ts`:** Define the normalized result contract described above, including independent windows/groups, unit semantics, capture time, and explicit error/partial states. Done when both initial adapters and the UI consume the same representation without provider-specific parsing in the UI.
 - [ ] **`src/auth.ts` and `src/http.ts`:** Implement Pi-only auth resolution, exact official-origin validation, limited headers, redirect rejection, bounded bodies, timeouts, and sanitized errors. Done when mocked safety tests prove no credential is sent to an unapproved origin and late work is discarded.
 - [ ] **Initial adapters:** Implement the OpenCode Go and OpenRouter contracts. Done when valid zero usage, all Go windows, subscription errors, finite spending caps, and uncapped OpenRouter keys render with correct semantics.
@@ -256,9 +256,9 @@ Apply the shared rules. Record any changes to the shared result contract before 
 
 #### Verification
 
-- [ ] `npm test` passes using only synthetic/mock data.
-- [ ] `npm run typecheck` passes without emitting runtime files.
-- [ ] `npm run pack:check` lists the intended entry point/runtime files and no sensitive or unintended content.
+- [ ] `pnpm test` passes using only synthetic/mock data.
+- [ ] `pnpm run typecheck` passes without emitting runtime files.
+- [ ] `pnpm run pack:check` lists the intended entry point/runtime files and no sensitive or unintended content.
 - [ ] Mocked command checks demonstrate independent provider completion and explicit no-configuration/error states.
 - [ ] User reviews the working command; any local installation used for review is separately authorized.
 
@@ -306,7 +306,7 @@ Apply the shared rules. Record any live discrepancy as sanitized evidence; do no
 
 #### Verification
 
-- [ ] `npm test`, `npm run typecheck`, and `npm run pack:check` pass.
+- [ ] `pnpm test`, `pnpm run typecheck`, and `pnpm run pack:check` pass.
 - [ ] Partial malformed optional windows leave valid quota visible with a notice.
 - [ ] No direct credential reads, new authentication flows, or provider write calls are introduced.
 - [ ] User compares displayed values with the relevant dashboards locally and reports only sanitized differences.
@@ -355,7 +355,7 @@ Apply the shared rules. Record real-account/product uncertainty until the user's
 
 #### Verification
 
-- [ ] `npm test`, `npm run typecheck`, and `npm run pack:check` pass.
+- [ ] `pnpm test`, `pnpm run typecheck`, and `pnpm run pack:check` pass.
 - [ ] Failure of optional monthly data does not hide valid credit-period data.
 - [ ] Every network request is read-only and origin-restricted; no billing mutations or additional authentication stores are used.
 - [ ] User confirms the result matches the intended Grok account and coding-credit product.
@@ -408,9 +408,9 @@ Apply the shared rules. Capture known API/product limitations instead of marking
 
 #### Verification
 
-- [ ] `npm test` passes, including provider, safety, lifecycle, and rendering checks.
-- [ ] `npm run typecheck` passes.
-- [ ] `npm run pack:check` lists only intended distributable files.
+- [ ] `pnpm test` passes, including provider, safety, lifecycle, and rendering checks.
+- [ ] `pnpm run typecheck` passes.
+- [ ] `pnpm run pack:check` lists only intended distributable files.
 - [ ] Active model switching, `/usage`, stale data, passed reset times, repeated reloads, and offline behavior work as specified.
 - [ ] Normal editor/footer and other extension status entries remain intact.
 - [ ] User performs final local end-to-end and provider-dashboard comparisons without exposing credentials to the agent.
