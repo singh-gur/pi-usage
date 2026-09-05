@@ -4,7 +4,7 @@
 
 Build an independently implemented, read-only Pi package for provider-reported subscription quota and OpenRouter key allowance. `/usage` refreshes all configured supported providers; an additive footer indicator shows remaining allowance for the active provider, reset countdown, and freshness.
 
-This plan is user-approved. Phase 1 is implemented and user-accepted; phases 2–4 are pending. Approval to save this plan does not authorize installation changes, commits, checkpoint tags, pushes, or publication.
+This plan is user-approved. Phases 1–2 are implemented and user-accepted; phases 3–4 are pending. Approval to save this plan does not authorize installation changes, commits, checkpoint tags, pushes, or publication.
 
 ## Planning Profile
 
@@ -86,7 +86,7 @@ Use small functions and a fixed provider list rather than a plugin framework or 
 - Refresh configured supported providers independently and concurrently. Surface loading and partial results rather than waiting for the slowest provider before displaying anything.
 - Show a dismissible, scrollable detailed TUI view; preserve the normal editor and footer after dismissal.
 - Include provider, allowance/group label, used and remaining values where known, unit, reset time where known, capture time, and freshness/error state.
-- Distinguish no configuration, authentication failure, unsupported data, partial data, request failure, stale data, and usable results.
+- Distinguish no configuration, authentication failure, unsupported data, partial data, request failure, stale data, and usable results. (Deviation, accepted 2026-09-05: per-provider no-configuration rows are not rendered in the /usage view; unconfigured providers are omitted entirely and the nothing-configured case shows an info notification. Configured-but-broken providers still render real error states, and the internal `not-configured` error kind remains as a resolution-race safety net. See Phase 2 execution notes.)
 - Missing providers do not trigger login. One failed provider must not blank successful providers.
 - Do not inject quota data into model context or persist results in session entries.
 - Do not combine provider allowances or independent quota domains into a single percentage.
@@ -291,7 +291,7 @@ Phase 1 implementation complete (2026-09-05). Recorded deviations and decisions:
 ### Phase 2 — Codex, Kimi, and Z.ai
 
 - **Objective:** Extend the command to five providers while preserving each provider's quota semantics.
-- **Status:** Not Started
+- **Status:** Complete (accepted 2026-09-05)
 - **Complexity:** High
 - **Estimated Time:** 90–120 minutes
 - **Prerequisites:** User-accepted phase 1 and its shared contracts.
@@ -308,11 +308,16 @@ Phase 1 implementation complete (2026-09-05). Recorded deviations and decisions:
 
 #### Implementation Tasks
 
-- [ ] **Codex adapter:** Implement runtime OAuth validation, bounded account-header derivation, shared windows, and separate additional groups. Done when mocked headers use the runtime account and malformed optional groups cannot hide valid shared quota. No redemption code or endpoints.
-- [ ] **Kimi adapter:** Implement main allowance, rolling windows, accepted numeric strings, and safe missing-field derivation. Done when absent versus invalid fields remain distinct and internal quota units are never labelled as model tokens.
-- [ ] **Z.ai adapter:** Implement envelope validation, both coding quota-type generations, window identification by known unit/number pairs, epoch-millisecond resets, and separate tool allowance. Done when array reordering cannot swap windows and unknown identifiers stay unknown.
-- [ ] **Provider registration:** Add the three canonical Pi provider IDs to the command's fixed supported list. Done when only configured supported providers are queried and failed adapters remain isolated.
-- [ ] **Tests:** Cover Codex account claims and shared/additional groups; Kimi numeric strings, missing data, and time units; Z.ai old/new/mixed quota types, reordered windows, reset units, API-level errors, and tool allowance. Done when these behaviors pass through the shared UI without semantic conflation.
+- [x] **Codex adapter:** Implement runtime OAuth validation, bounded account-header derivation, shared windows, and separate additional groups. Done when mocked headers use the runtime account and malformed optional groups cannot hide valid shared quota. No redemption code or endpoints.
+  - `src/providers/codex.ts`: OAuth provenance enforced (`source: "OAuth"`, API-key resolution rejected before any request); `chatgpt-account-id` derived from the runtime token's `https://api.openai.com/auth.chatgpt_account_id` claim with structure/charset validation; `primary_window`/`secondary_window` + separate `additional_rate_limits` groups; `reset_at` epoch seconds; window durations in labels. Covered by mocked tests.
+- [x] **Kimi adapter:** Implement main allowance, rolling windows, accepted numeric strings, and safe missing-field derivation. Done when absent versus invalid fields remain distinct and internal quota units are never labelled as model tokens.
+  - `src/providers/kimi.ts`: main `usage` + rolling `limits` (with or without `detail` wrapper); finite numeric strings accepted; missing used/remaining derived only from valid counterpart + limit; present-but-invalid drops the bucket with a partial notice; window labels from returned `timeUnit` (second/minute/hour/day), never position; unit "uses" under domain "Coding plan allowance".
+- [x] **Z.ai adapter:** Implement envelope validation, both coding quota-type generations, window identification by known unit/number pairs, epoch-millisecond resets, and separate tool allowance. Done when array reordering cannot swap windows and unknown identifiers stay unknown.
+  - `src/providers/zai.ts`: `code`/`success` envelope validated even at HTTP 200; raw key in `Authorization` (official plugin convention); `TOKENS_LIMIT` + `CREDIT_LIMIT` as coding allowance with inverted `usage`=limit / `currentValue`=used semantics; `(3,5)`→5-hour and `(6,1)`→weekly identification, never array order; `nextResetTime` epoch ms with null/0/missing unknown; `TIME_LIMIT` as a separate "MCP tools (monthly)" window.
+- [x] **Provider registration:** Add the three canonical Pi provider IDs to the command's fixed supported list. Done when only configured supported providers are queried and failed adapters remain isolated.
+  - `src/index.ts` ADAPTERS now `opencode-go`, `openrouter`, `openai-codex`, `kimi-coding`, `zai`; five-provider view test shows independent rendering without conflation; unconfigured providers issue no requests.
+- [x] **Tests:** Cover Codex account claims and shared/additional groups; Kimi numeric strings, missing data, and time units; Z.ai old/new/mixed quota types, reordered windows, reset units, API-level errors, and tool allowance. Done when these behaviors pass through the shared UI without semantic conflation.
+  - 35 new tests (54 → 89 total): Codex claim/header/OAuth-rejection/group isolation; Kimi strings, derivation, invalid-field dropping, time-unit mapping; Z.ai credit/tokens/time shapes, reordering, envelope errors, unknown identifiers; extension-level five-provider render, codex OAuth enforcement, partial-data notice.
 
 #### Execution Tracking Rules
 
@@ -320,10 +325,10 @@ Apply the shared rules. Record any live discrepancy as sanitized evidence; do no
 
 #### Verification
 
-- [ ] `pnpm test`, `pnpm run typecheck`, and `pnpm run pack:check` pass.
-- [ ] Partial malformed optional windows leave valid quota visible with a notice.
-- [ ] No direct credential reads, new authentication flows, or provider write calls are introduced.
-- [ ] User compares displayed values with the relevant dashboards locally and reports only sanitized differences.
+- [x] `pnpm test`, `pnpm run typecheck`, and `pnpm run pack:check` pass. (89/89 tests; tarball lists only src + manifests)
+- [x] Partial malformed optional windows leave valid quota visible with a notice. (provider-level tests + extension-level partial-data notice render test)
+- [x] No direct credential reads, new authentication flows, or provider write calls are introduced. (All auth via `ctx.modelRegistry` resolution; GET-only HTTP; no new flows)
+- [x] User compares displayed values with the relevant dashboards locally and reports only sanitized differences. (Covered by user acceptance 2026-09-05; no sanitized discrepancies reported.)
 
 #### Completion Gate
 
@@ -335,7 +340,16 @@ Five-provider command with correct grouping and explicit partial-data handling.
 
 #### Execution Notes
 
-None.
+Phase 2 implementation complete (2026-09-05). Decisions:
+
+- `src/auth.ts` needed no changes after all: adapter-specific auth needs are enforced at the adapter layer using the resolved provenance already returned by phase 1 (`oauth` flag for Codex; raw-key vs Bearer is an adapter header choice). The plan's file table anticipated an auth.ts modification that turned out unnecessary.
+- Codex account-header derivation decodes the runtime token locally (base64url JWT payload → `https://api.openai.com/auth.chatgpt_account_id`), mirroring Pi's inspected request implementation; the id is charset-validated before use as a header value. Token decoding is not treated as identity verification.
+- Codex window labels carry durations derived from `limit_window_seconds` (e.g. "primary (shared) · 5h"); shared and `additional_rate_limits` groups stay separate windows.
+- Kimi bucket dropping independently reimplements the reference semantics: present-but-invalid `used`/`remaining` drops that bucket with a partial notice; derivation only from valid counterpart + limit.
+- Z.ai follows the observed inverted naming (`usage` = limit, `currentValue` = consumed); `remaining` is used as returned when finite. `TIME_LIMIT` renders as a separate "MCP tools (monthly)" window inside the same provider result — domains stay separate windows and are never combined.
+- Protocol shapes re-verified during implementation against the plan's cited references (openai/codex rate-limit tests, Z.ai official plugin + CREDIT_LIMIT report + ai-usagebar wire shapes, specode Kimi parser) plus Pi's own provider definitions (`openai-codex`, `kimi-coding`, `zai` base URLs and auth types).
+- **Review fix (user-reported):** with five providers the view overflowed and scrolling did not repaint. Two root causes in `src/ui.ts`: the custom component replaced the editor slot but used a hardcoded 20-row viewport, and `handleInput` never called `tui.requestRender()` after offset changes. Fixed by deriving the viewport from `tui.terminal.rows` (reserving 4 chrome rows) and requesting a repaint on every handled key; a scroll-position hint line (`3-22 of 41`) was added. Regression tests cover repaint-on-scroll and terminal-height-derived viewport height.
+- **Review decision (user-requested):** providers without credentials configured in Pi are now omitted from the /usage view entirely instead of showing a `not configured` row. The command filters on `getProviderAuthStatus().configured` before creating entries; when nothing is configured it shows an info notification instead of an empty view. The `not-configured` error kind remains as a safety net for status/resolution races, and configured-but-broken providers still show their real error states.
 
 ### Phase 3 — Grok subscription billing
 

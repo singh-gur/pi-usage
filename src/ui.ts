@@ -120,50 +120,77 @@ export function renderUsageLines(entries: UsageEntry[], theme: ThemeLike): strin
  */
 export class UsageView {
   private offset = 0;
-  private readonly maxRows: number;
   private readonly theme: ThemeLike;
   private readonly getEntries: () => UsageEntry[];
   private readonly onClose: () => void;
+  private readonly requestRender: () => void;
+  private readonly getViewportRows: (() => number) | undefined;
+  private readonly fixedMaxRows: number | undefined;
 
   constructor(options: {
     theme: ThemeLike;
     getEntries: () => UsageEntry[];
     onClose: () => void;
+    /** Trigger a TUI repaint after input-driven state changes. */
+    requestRender: () => void;
+    /** Terminal height source; the viewport uses it minus reserved chrome rows. */
+    getViewportRows?: () => number;
+    /** Explicit viewport height override (tests); defaults to terminal-derived. */
     maxRows?: number;
   }) {
     this.theme = options.theme;
     this.getEntries = options.getEntries;
     this.onClose = options.onClose;
-    this.maxRows = options.maxRows ?? 20;
+    this.requestRender = options.requestRender;
+    this.getViewportRows = options.getViewportRows;
+    this.fixedMaxRows = options.maxRows;
+  }
+
+  /** Rows of content to show: fit the available terminal height (footer,
+   *  working row, and margins reserved), never a fixed count. */
+  private viewportRows(): number {
+    if (this.fixedMaxRows !== undefined) return this.fixedMaxRows;
+    const termRows = this.getViewportRows?.() ?? 24;
+    return Math.max(4, termRows - 4);
   }
 
   handleInput(data: string): void {
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || data === "q") {
       this.onClose();
-    } else if (matchesKey(data, Key.up) || data === "k") {
+      return;
+    }
+    const rows = this.viewportRows();
+    if (matchesKey(data, Key.up) || data === "k") {
       this.offset = Math.max(0, this.offset - 1);
     } else if (matchesKey(data, Key.down) || data === "j") {
       this.offset += 1;
     } else if (matchesKey(data, Key.pageUp)) {
-      this.offset = Math.max(0, this.offset - this.maxRows);
+      this.offset = Math.max(0, this.offset - rows);
     } else if (matchesKey(data, Key.pageDown)) {
-      this.offset += this.maxRows;
+      this.offset += rows;
     } else if (matchesKey(data, Key.home)) {
       this.offset = 0;
     } else if (matchesKey(data, Key.end)) {
       this.offset = Number.MAX_SAFE_INTEGER;
+    } else {
+      return; // unhandled key: no repaint needed
     }
+    // Scrolling changed visible content; the TUI does not repaint on its own.
+    this.requestRender();
   }
 
   render(width: number): string[] {
     const body = renderUsageLines(this.getEntries(), this.theme);
-    const hint = this.theme.fg("dim", "↑↓/jk scroll · pgup/pgdn · esc close");
-    const lines = [...body, "", hint];
-    const maxOffset = Math.max(0, lines.length - this.maxRows);
+    const lines = [...body];
+    const rows = this.viewportRows();
+    const maxOffset = Math.max(0, lines.length - rows);
     this.offset = Math.min(this.offset, maxOffset);
-    return lines
-      .slice(this.offset, this.offset + this.maxRows)
-      .map((line) => truncateToWidth(line, width));
+    const scrolled = maxOffset > 0 && this.offset > 0;
+    const hint = scrolled
+      ? this.theme.fg("dim", `↑↓/jk scroll (${this.offset + 1}-${Math.min(this.offset + rows, lines.length)} of ${lines.length}) · esc close`)
+      : this.theme.fg("dim", "↑↓/jk scroll · pgup/pgdn · esc close");
+    const view = [...lines.slice(this.offset, this.offset + rows), hint];
+    return view.map((line) => truncateToWidth(line, width));
   }
 
   invalidate(): void {

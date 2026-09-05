@@ -14,9 +14,18 @@ import { UsageError, type ProviderUsage, type QuotaAdapter } from "./types.ts";
 import { UsageView, type UsageEntry } from "./ui.ts";
 import { opencodeGoAdapter } from "./providers/opencode-go.ts";
 import { openrouterAdapter } from "./providers/openrouter.ts";
+import { codexAdapter } from "./providers/codex.ts";
+import { kimiAdapter } from "./providers/kimi.ts";
+import { zaiAdapter } from "./providers/zai.ts";
 
 /** Fixed supported-provider list (grows in later phases). */
-const ADAPTERS: readonly QuotaAdapter[] = [opencodeGoAdapter, openrouterAdapter];
+const ADAPTERS: readonly QuotaAdapter[] = [
+  opencodeGoAdapter,
+  openrouterAdapter,
+  codexAdapter,
+  kimiAdapter,
+  zaiAdapter,
+];
 
 /** Whole-provider bound, including waiting for auth resolution. */
 const PROVIDER_BOUND_MS = 30_000;
@@ -65,13 +74,21 @@ export default function (pi: ExtensionAPI) {
         providerInfo: (id) => ctx.modelRegistry.getProvider(id) ?? undefined,
       };
 
+      // Only providers with credentials configured in Pi are shown and queried.
+      // The not-configured error kind stays as a safety net for resolution races.
+      const adapters = ADAPTERS.filter((adapter) => gateway.isConfigured(adapter.id));
+      if (adapters.length === 0) {
+        ctx.ui.notify("No supported providers are configured in Pi", "info");
+        return;
+      }
+
       const controller = new AbortController();
-      const entries: UsageEntry[] = ADAPTERS.map((adapter) => ({ name: adapter.name }));
+      const entries: UsageEntry[] = adapters.map((adapter) => ({ name: adapter.name }));
       let requestRender: (() => void) | undefined = () => {};
       const onUpdate = () => requestRender?.();
 
       void Promise.all(
-        ADAPTERS.map(async (adapter, index) => {
+        adapters.map(async (adapter, index) => {
           const usage = isOffline()
             ? errorUsage(
                 adapter,
@@ -92,6 +109,8 @@ export default function (pi: ExtensionAPI) {
             controller.abort();
             done(undefined);
           },
+          requestRender: () => tui.requestRender(),
+          getViewportRows: () => tui.terminal.rows,
         });
         requestRender = () => tui.requestRender();
         return view;

@@ -102,6 +102,16 @@ export function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/** Finite number or a finite numeric string (providers that quote numbers as strings). */
+export function finiteNumberOrString(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
 /** Parse an epoch-ms reset timestamp from an epoch or ISO string value. */
 export function parseResetTime(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {

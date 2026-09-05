@@ -38,13 +38,16 @@ function makeCtx(options: {
   mode: string;
   configured?: Record<string, boolean>;
   authByKey?: Record<string, string | undefined>;
+  oauthByKey?: Record<string, boolean>;
   fetchRoutes?: Record<string, () => Response | Promise<Response>>;
 }) {
   const configured = options.configured ?? {};
   const authByKey = options.authByKey ?? {};
+  const oauthByKey = options.oauthByKey ?? {};
   const routes = options.fetchRoutes ?? {};
 
   let customHandlesCurrent: CustomHandle[] = [];
+  const notifications: Array<{ message: string; level: string }> = [];
   const custom = (factoryFn: (tui: unknown, theme: unknown, kb: unknown, done: (v: undefined) => void) => unknown) =>
     new Promise<undefined>((resolve) => {
       let doneCalled = false;
@@ -52,7 +55,7 @@ function makeCtx(options: {
         doneCalled = true;
         resolve(undefined);
       };
-      const tui = { requestRender: () => {} };
+      const tui = { requestRender: () => {}, terminal: { rows: 40 } };
       const component = factoryFn(tui, IDENTITY_THEME, {}, done) as CustomHandle["component"];
       customHandlesCurrent.push({ component, done, doneCalled: () => doneCalled });
     });
@@ -62,14 +65,14 @@ function makeCtx(options: {
     modelRegistry: {
       getProviderAuthStatus: (id: string) => ({ configured: configured[id] ?? false }),
       getProviderAuth: async (id: string) =>
-        authByKey[id] ? { auth: { apiKey: authByKey[id] }, source: "stored" } : undefined,
+        authByKey[id] ? { auth: { apiKey: authByKey[id] }, source: oauthByKey[id] ? "OAuth" : "stored" } : undefined,
       getProvider: () => ({}),
     },
-    ui: { custom },
+    ui: { custom, notify: (message: string, level: string) => notifications.push({ message, level }) },
   };
   // Expose handles for assertions.
   (ctx as { handles?: CustomHandle[] }).handles = customHandlesCurrent;
-  return { ctx, handles: customHandlesCurrent };
+  return { ctx, handles: customHandlesCurrent, notifications };
 }
 
 function installFetch(routes: Record<string, () => Response | Promise<Response>>, log: Array<{ url: string; headers: Record<string, string> }>) {
@@ -178,7 +181,7 @@ test("extension: shows loading state before providers respond, then updates", as
   await handlerPromise;
 });
 
-test("extension: unconfigured provider shows explicit state, others still queried", async () => {
+test("extension: unconfigured providers are omitted from the view entirely", async () => {
   const harness = setupExtension();
   installFetch({ "opencode.ai": () => new Response(GO_BODY, { status: 200 }) }, harness.fetchCalls);
   const { ctx, handles } = makeCtx({
@@ -190,12 +193,29 @@ test("extension: unconfigured provider shows explicit state, others still querie
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
   await settle();
   const lines = handles[0]!.component.render(100).join("\n");
-  assert.ok(/not configured/.test(lines), "explicit not-configured state");
   assert.ok(/12\.5% used/.test(lines), "configured provider still fetched");
-  assert.equal(harness.fetchCalls.length, 1, "unconfigured provider triggers no request");
+  for (const absent of ["OpenRouter", "Kimi", "Codex", "Z.AI"]) {
+    assert.ok(!lines.includes(absent), `${absent} must not appear`);
+  }
+  assert.equal(harness.fetchCalls.length, 1, "unconfigured providers trigger no request");
 
   handles[0]!.done(undefined);
   await handlerPromise;
+});
+
+test("extension: nothing configured notifies instead of opening an empty view", async () => {
+  const harness = setupExtension();
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches++;
+    return new Response("{}");
+  }) as typeof fetch;
+  const { ctx, handles, notifications } = makeCtx({ mode: "tui", configured: {} });
+  await harness.commands.get("usage")!.handler("", ctx);
+  assert.equal(handles.length, 0, "no view opened");
+  assert.equal(fetches, 0);
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0]!.message, "No supported providers are configured in Pi");
 });
 
 test("extension: PI_OFFLINE suppresses quota networking", async () => {
@@ -284,19 +304,20 @@ test("view: scroll clamps at both ends and follows input", () => {
     theme: IDENTITY_THEME,
     getEntries: () => entries,
     onClose: () => (closed = true),
+    requestRender: () => {},
     maxRows: 3,
   });
-  const full = renderUsageLines(entries, IDENTITY_THEME).length + 2; // + blank + hint
+  const full = renderUsageLines(entries, IDENTITY_THEME).length;
   assert.ok(full > 3, "content must exceed the viewport for scrolling");
   const first = view.render(80);
-  assert.equal(first.length, 3);
+  assert.equal(first.length, 4, "3 content rows + hint line");
   assert.ok(first[0]!.startsWith("P —"), "starts at the provider header");
   view.handleInput("\x1b[B"); // down
   view.handleInput("\x1b[B");
   view.handleInput("\x1b[B"); // beyond end
   const scrolled = view.render(80);
-  assert.equal(scrolled.length, 3);
-  assert.ok(scrolled[0]!.trimStart().startsWith("w"), "view scrolled into window lines");
+  assert.equal(scrolled.length, 4);
+  assert.ok(scrolled[0]!.trimStart().startsWith("w"), "view scrolled into window lines");;
   view.handleInput("\x1b[H"); // home
   assert.ok(view.render(80)[0]!.startsWith("P —"), "home returns to the top");
   view.handleInput("\x1b[A"); // up at top stays
@@ -310,10 +331,205 @@ test("view: every rendered line respects the width bound", () => {
     { name: "OpenCode Go", usage: goUsage() },
     { name: "OpenRouter", usage: goUsage() },
   ];
-  const view = new UsageView({ theme: IDENTITY_THEME, getEntries: () => entries, onClose: () => {}, maxRows: 12 });
+  const view = new UsageView({ theme: IDENTITY_THEME, getEntries: () => entries, onClose: () => {}, requestRender: () => {}, maxRows: 12 });
   for (const width of [20, 40, 80]) {
     for (const line of view.render(width)) {
       assert.ok(visibleWidth(line) <= width, `width ${width} exceeded: ${line}`);
     }
   }
+});
+
+// ------------------------------------------------------- phase 2 providers
+
+const CODEX_JWT = `${Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url")}.${Buffer.from(
+  JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-9" } }),
+).toString("base64url")}.sig`;
+
+const FIVE_PROVIDER_BODIES = {
+  "opencode.ai": () => new Response(GO_BODY, { status: 200 }),
+  "openrouter.ai": () => new Response(OR_BODY, { status: 200 }),
+  "chatgpt.com": () =>
+    new Response(
+      JSON.stringify({
+        rate_limit: {
+          primary_window: { used_percent: 42, limit_window_seconds: 18_000, reset_at: Math.floor(Date.now() / 1000) + 3_600 },
+          secondary_window: { used_percent: 5, limit_window_seconds: 604_800, reset_at: Math.floor(Date.now() / 1000) + 3_600 },
+        },
+      }),
+      { status: 200 },
+    ),
+  "api.kimi.com": () =>
+    new Response(
+      JSON.stringify({
+        usage: { limit: 100, used: 30, remaining: 70 },
+        limits: [{ detail: { limit: 50, used: 10, remaining: 40 }, window: { duration: 5, timeUnit: "TIME_UNIT_HOUR" } }],
+      }),
+      { status: 200 },
+    ),
+  "api.z.ai": () =>
+    new Response(
+      JSON.stringify({
+        code: 200,
+        success: true,
+        data: {
+          limits: [
+            { type: "CREDIT_LIMIT", unit: 3, number: 5, usage: 2000, currentValue: 500, percentage: 25, nextResetTime: Date.now() + 7_260_000 },
+          ],
+        },
+      }),
+      { status: 200 },
+    ),
+};
+
+const ALL_CONFIGURED = {
+  "opencode-go": true,
+  openrouter: true,
+  "openai-codex": true,
+  "kimi-coding": true,
+  zai: true,
+};
+
+test("extension: five providers render independently without conflation", async () => {
+  const harness = setupExtension();
+  installFetch(FIVE_PROVIDER_BODIES, harness.fetchCalls);
+  const { ctx, handles } = makeCtx({
+    mode: "tui",
+    configured: ALL_CONFIGURED,
+    authByKey: {
+      "opencode-go": "k",
+      openrouter: "k",
+      "openai-codex": CODEX_JWT,
+      "kimi-coding": "k",
+      zai: "k",
+    },
+    oauthByKey: { "openai-codex": true },
+  });
+
+  const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+
+  let lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(lines.includes("OpenCode Go — Coding plan allowance"));
+  assert.ok(/12\.5% used/.test(lines));
+  assert.ok(/\$25\.50 used/.test(lines));
+  assert.ok(/primary \(shared\) · 5h/.test(lines) && /42% used/.test(lines));
+
+  // Remaining providers live below the 20-row viewport; scroll to them.
+  handles[0]!.component.handleInput("\x1b[6~"); // page down
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/Kimi For Coding — Coding plan allowance/.test(lines));
+  assert.ok(/5h window/.test(lines));
+  assert.ok(/Z\.AI — Coding plan allowance/.test(lines));
+  assert.ok(/5-hour/.test(lines) && /25% used/.test(lines));
+
+  // Codex request used the runtime-derived account header.
+  const codexCall = harness.fetchCalls.find((c) => c.url.includes("chatgpt.com"));
+  assert.ok(codexCall);
+  assert.equal(codexCall!.headers["chatgpt-account-id"], "acct-9");
+  const zaiCall = harness.fetchCalls.find((c) => c.url.includes("api.z.ai"));
+  assert.equal(zaiCall!.headers.authorization, "k", "zai uses the raw key");
+
+  handles[0]!.done(undefined);
+  await handlerPromise;
+});
+
+test("extension: codex without OAuth provenance shows an error, others unaffected", async () => {
+  const harness = setupExtension();
+  installFetch(
+    {
+      "opencode.ai": () => new Response(GO_BODY, { status: 200 }),
+      "chatgpt.com": () => new Response("{}", { status: 200 }),
+    },
+    harness.fetchCalls,
+  );
+  const { ctx, handles } = makeCtx({
+    mode: "tui",
+    configured: { "opencode-go": true, "openai-codex": true },
+    authByKey: { "opencode-go": "k", "openai-codex": "sk-not-oauth" },
+    oauthByKey: { "openai-codex": false },
+  });
+
+  const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  const lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/auth: Codex quota requires subscription OAuth credentials/.test(lines));
+  assert.ok(/12\.5% used/.test(lines), "other providers unaffected");
+  assert.ok(!harness.fetchCalls.some((c) => c.url.includes("chatgpt.com")), "no codex request issued");
+
+  handles[0]!.done(undefined);
+  await handlerPromise;
+});
+
+test("extension: partial-data notice renders for malformed optional windows", async () => {
+  const harness = setupExtension();
+  installFetch(
+    {
+      "opencode.ai": () =>
+        new Response(
+          JSON.stringify({
+            usage: {
+              rolling: { status: "ok", percent: 12.5, resetsAt: new Date(Date.now() + 7_260_000).toISOString() },
+              weekly: { status: "ok", percent: "bogus" },
+              monthly: { status: "ok", percent: 1 },
+            },
+          }),
+          { status: 200 },
+        ),
+    },
+    harness.fetchCalls,
+  );
+  const { ctx, handles } = makeCtx({
+    mode: "tui",
+    configured: { "opencode-go": true },
+    authByKey: { "opencode-go": "k" },
+  });
+
+  const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  const lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/12\.5% used/.test(lines), "valid window still visible");
+  assert.ok(/partial data: 1 usage window/.test(lines), "partial notice rendered");
+
+  handles[0]!.done(undefined);
+  await handlerPromise;
+});
+
+// ------------------------------------------------- scroll repaint regression
+
+test("view: scrolling input requests a TUI repaint", () => {
+  let repaints = 0;
+  const entries: UsageEntry[] = [{ name: "P", usage: goUsage() }];
+  const view = new UsageView({
+    theme: IDENTITY_THEME,
+    getEntries: () => entries,
+    onClose: () => {},
+    requestRender: () => repaints++,
+    maxRows: 2,
+  });
+  view.handleInput("\x1b[B"); // down
+  assert.equal(repaints, 1, "scroll key must trigger a repaint");
+  view.handleInput("\x1b[A"); // up
+  assert.equal(repaints, 2);
+  view.handleInput("z"); // unhandled key: no repaint
+  assert.equal(repaints, 2);
+  view.handleInput("\x1b"); // escape closes without extra repaint
+  assert.equal(repaints, 2);
+});
+
+test("view: viewport height follows the terminal, not a fixed row count", () => {
+  const manyWindows = goUsage();
+  manyWindows.windows = Array.from({ length: 30 }, (_, i) => ({ label: `w${i}`, usedPercent: i, status: "ok" }));
+  const entries: UsageEntry[] = [{ name: "P", usage: manyWindows }];
+  const total = renderUsageLines(entries, IDENTITY_THEME).length;
+
+  const small = new UsageView({ theme: IDENTITY_THEME, getEntries: () => entries, onClose: () => {}, requestRender: () => {}, getViewportRows: () => 12 });
+  assert.equal(small.render(80).length, 9, "12 terminal rows reserve 4 for chrome plus 1 hint");
+
+  const large = new UsageView({ theme: IDENTITY_THEME, getEntries: () => entries, onClose: () => {}, requestRender: () => {}, getViewportRows: () => 60 });
+  assert.equal(large.render(80).length, Math.min(total, 56) + 1, "large terminals show all content");
+
+  // Scrolling through the small viewport reaches the last line.
+  small.handleInput("\x1b[F"); // end
+  const last = small.render(80).join("\n");
+  assert.ok(last.includes("w29"), "end key reaches the final window");
 });
