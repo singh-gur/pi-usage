@@ -1,9 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import factory from "../src/index.ts";
 import { UsageView, renderUsageLines, formatFooterText, formatFooterError, type UsageEntry } from "../src/ui.ts";
 import type { ProviderUsage } from "../src/types.ts";
+
+initTheme("dark");
 
 // ------------------------------------------------------------- test doubles
 
@@ -47,6 +53,9 @@ function makeCtx(options: {
   providerBaseUrl?: Record<string, string>;
   activeProvider?: string;
   fetchRoutes?: Record<string, () => Response | Promise<Response>>;
+  cwd?: string;
+  projectTrusted?: boolean;
+  selections?: string[];
 }) {
   const configured = options.configured ?? {};
   const authByKey = options.authByKey ?? {};
@@ -68,8 +77,12 @@ function makeCtx(options: {
       customHandlesCurrent.push({ component, done, doneCalled: () => doneCalled });
     });
 
+  const selections = [...(options.selections ?? [])];
   const ctx = {
     mode: options.mode,
+    cwd: options.cwd ?? process.cwd(),
+    hasUI: options.mode === "tui" || options.mode === "rpc",
+    isProjectTrusted: () => options.projectTrusted ?? true,
     model: options.activeProvider !== undefined ? { provider: options.activeProvider, id: "test-model" } : undefined,
     modelRegistry: {
       getProviderAuthStatus: (id: string) => ({ configured: configured[id] ?? false }),
@@ -79,6 +92,7 @@ function makeCtx(options: {
     },
     ui: {
       custom,
+      select: async () => selections.shift(),
       notify: (message: string, level: string) => notifications.push({ message, level }),
       setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
     },
@@ -115,8 +129,37 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 test("extension: registers the /usage command without LLM triggers", () => {
   const harness = setupExtension();
   assert.ok(harness.commands.has("usage"));
-  assert.equal(harness.commands.size, 1);
+  assert.ok(harness.commands.has("usage-settings"));
+  assert.equal(harness.commands.size, 2);
   assert.equal(typeof harness.commands.get("usage")!.handler, "function");
+});
+
+test("extension: /usage-settings persists project changes through the TUI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-extension-"));
+  try {
+    const harness = setupExtension();
+    const { ctx, handles, notifications } = makeCtx({
+      mode: "tui",
+      cwd: root,
+      projectTrusted: true,
+      selections: ["Project"],
+    });
+    const handler = harness.commands.get("usage-settings")!.handler("", ctx);
+    await settle();
+    assert.equal(handles.length, 1);
+    assert.match(handles[0]!.component.render(100).join("\n"), /pi-usage settings — Project/);
+    handles[0]!.component.handleInput("\r"); // inherit -> full
+    handles[0]!.component.handleInput("\r"); // full -> compact
+    handles[0]!.component.handleInput("\x1b");
+    await handler;
+
+    assert.deepEqual(JSON.parse(await readFile(join(root, ".pi", "pi-usage.json"), "utf8")), {
+      footerFormat: "compact",
+    });
+    assert.ok(notifications.some(({ message }) => message === "Saved project pi-usage settings"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("extension: non-tui modes stay silent with no fetch and no custom UI", async () => {
@@ -691,6 +734,20 @@ test("footer: formatFooterText shows remaining, reset, age, and stale markers", 
     }, { now })),
     "🔴 0% left · ⏳ passed",
   );
+});
+
+test("footer: compact and off formats", () => {
+  const usage: ProviderUsage = {
+    providerId: "x",
+    providerName: "X",
+    domainLabel: "d",
+    capturedAt: 1_700_000_000_000,
+    windows: [{ label: "rolling", usedPercent: 12.5, resetsAt: 1_700_003_600_000 }],
+  };
+  assert.equal(formatFooterText(usage, { now: 1_700_000_000_000, format: "compact" }), "🟢 87.5%");
+  assert.equal(formatFooterText(usage, { now: 1_700_000_000_000, format: "off" }), undefined);
+  assert.equal(formatFooterError("request", 90_000, "compact"), "🔴 request");
+  assert.equal(formatFooterError("request", 90_000, "off"), undefined);
 });
 
 test("footer: secondary weekly limits are omitted", () => {

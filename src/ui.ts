@@ -5,6 +5,7 @@
  * provider-specific parsing happens here. Color is always paired with text.
  */
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { FooterFormat } from "./settings.ts";
 import type { ProviderUsage, QuotaWindow } from "./types.ts";
 
 /** Structural theme slice; the real Pi theme satisfies this. */
@@ -188,14 +189,17 @@ function statusLight(window: QuotaWindow): string {
 /** Compact remaining form for the primary window; ⏳ marks reset timing. */
 export function formatFooterText(
   usage: ProviderUsage,
-  options: { now?: number; stale?: boolean } = {},
+  options: { now?: number; stale?: boolean; format?: FooterFormat } = {},
 ): string | undefined {
+  const format = options.format ?? "full";
+  if (format === "off") return undefined;
   const now = options.now ?? Date.now();
   const window = usage.windows[0];
   if (!window) return undefined;
   const parts: string[] = [];
   const value = remainingValue(window);
   if (value === undefined) return undefined;
+  if (format === "compact") return `${statusLight(window)} ${value}`;
   parts.push(`${value} left`);
   if (window.resetsAt !== undefined) {
     parts.push(window.resetsAt > now ? `⏳ ${formatDuration(window.resetsAt - now)}` : "⏳ passed");
@@ -209,7 +213,13 @@ export function formatFooterText(
 }
 
 /** Footer text for a provider with no usable data and a failed latest refresh. */
-export function formatFooterError(kind: string, retryInMs: number | undefined): string {
+export function formatFooterError(
+  kind: string,
+  retryInMs: number | undefined,
+  format: FooterFormat = "full",
+): string | undefined {
+  if (format === "off") return undefined;
+  if (format === "compact") return `🔴 ${kind}`;
   const retry = retryInMs !== undefined && retryInMs > 0 ? ` · retry ${formatDuration(retryInMs)}` : "";
   return `🔴 ${kind} error${retry}`;
 }

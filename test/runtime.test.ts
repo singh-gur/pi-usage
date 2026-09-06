@@ -306,6 +306,7 @@ import {
   type MonitorSession,
 } from "../src/refresh.ts";
 import type { GetJson } from "../src/http.ts";
+import type { UsageSettings } from "../src/settings.ts";
 import type { QuotaAdapter, QuotaWindow } from "../src/types.ts";
 
 type GateResult = { status: number; data: unknown; retryAfterMs?: number };
@@ -345,6 +346,7 @@ function monitorEnv(options: {
   gated?: boolean;
   configured?: string[];
   makeWindows?: (now: number) => QuotaWindow[];
+  settings?: UsageSettings;
 } = {}): MonitorEnv {
   const responses = options.responses ?? [{ status: 200, data: {} }];
   const configured = new Set(options.configured ?? ["opencode-go", "openrouter"]);
@@ -373,7 +375,7 @@ function monitorEnv(options: {
     mode: "tui",
     setStatus: (key, text) => statusCalls.push({ key, text }),
   };
-  const monitor = new UsageMonitor({ adapters, createRequester: () => getJson });
+  const monitor = new UsageMonitor({ adapters, createRequester: () => getJson, ...(options.settings ? { settings: options.settings } : {}) });
   return {
     monitor,
     session,
@@ -427,6 +429,33 @@ test("monitor: five-minute poll refreshes only the active provider", async () =>
   }
 });
 
+test("monitor: poll interval is configurable and can be disabled", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const oneMinute = monitorEnv({
+      settings: { footerFormat: "full", pollIntervalMinutes: 1, refreshAfterTurn: true },
+    });
+    oneMinute.monitor.startSession(oneMinute.session, "opencode-go");
+    await drain();
+    mock.timers.tick(60_000);
+    await drain();
+    assert.equal(oneMinute.calls.length, 2, "one-minute poll applied");
+    oneMinute.monitor.shutdown();
+
+    const disabled = monitorEnv({
+      settings: { footerFormat: "full", pollIntervalMinutes: 0, refreshAfterTurn: true },
+    });
+    disabled.monitor.startSession(disabled.session, "opencode-go");
+    await drain();
+    mock.timers.tick(POLL_INTERVAL_MS * 2);
+    await drain();
+    assert.equal(disabled.calls.length, 1, "off keeps the initial refresh but schedules no poll");
+    disabled.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("monitor: agent_settled skips fresh data and refreshes once it is 60s old", async () => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
   try {
@@ -440,6 +469,23 @@ test("monitor: agent_settled skips fresh data and refreshes once it is 60s old",
     env.monitor.onAgentSettled();
     await drain();
     assert.equal(env.calls.length, 2);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: after-turn refresh can be disabled", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({
+      settings: { footerFormat: "full", pollIntervalMinutes: 5, refreshAfterTurn: false },
+    });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    mock.timers.tick(EVENT_MIN_AGE_MS + 1_000);
+    await env.monitor.onAgentSettled();
+    assert.equal(env.calls.length, 1);
     env.monitor.shutdown();
   } finally {
     mock.timers.reset();
@@ -603,6 +649,31 @@ test("monitor: model switch refreshes the new active provider only on provider c
     env.monitor.setActiveProvider("openrouter"); // same provider: no request storm
     await drain();
     assert.equal(env.calls.filter((c) => c.includes("openrouter")).length, 1);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: footer format changes apply immediately and off suppresses automatic work", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    env.monitor.setSettings({ footerFormat: "compact", pollIntervalMinutes: 5, refreshAfterTurn: true });
+    await drain();
+    assert.equal(lastStatus(env)?.text, "🟢 87.5%", "cached footer rerenders compactly");
+
+    env.monitor.setSettings({ footerFormat: "off", pollIntervalMinutes: 5, refreshAfterTurn: true });
+    await drain();
+    assert.deepEqual(lastStatus(env), { key: STATUS_KEY, text: undefined });
+    mock.timers.tick(POLL_INTERVAL_MS * 2);
+    await drain();
+    assert.equal(env.calls.length, 1, "disabled footer has no automatic refresh work");
+
+    await env.monitor.refreshProvider(env.adapters[0]!);
+    assert.equal(env.calls.length, 2, "manual /usage refresh remains available");
     env.monitor.shutdown();
   } finally {
     mock.timers.reset();

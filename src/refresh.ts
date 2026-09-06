@@ -19,10 +19,11 @@ import type { AuthGateway } from "./auth.ts";
 import { resolveQuotaAuth } from "./auth.ts";
 import { bounded, createGetJson, DEFAULT_HTTP_LIMITS, isOffline, type GetJson } from "./http.ts";
 import { UsageError, type ProviderError, type ProviderUsage, type QuotaAdapter } from "./types.ts";
+import { DEFAULT_USAGE_SETTINGS, type UsageSettings } from "./settings.ts";
 import { formatFooterError, formatFooterText } from "./ui.ts";
 
 export const STATUS_KEY = "usage";
-export const POLL_INTERVAL_MS = 5 * 60_000;
+export const POLL_INTERVAL_MS = DEFAULT_USAGE_SETTINGS.pollIntervalMinutes * 60_000;
 /** agent_settled only refreshes when cached data is at least this old. */
 export const EVENT_MIN_AGE_MS = 60_000;
 
@@ -55,6 +56,7 @@ export interface UsageMonitorOptions {
   now?(): number;
   /** Injectable GET factory (tests); production uses the bounded HTTP layer. */
   createRequester?(signal: AbortSignal): GetJson;
+  settings?: UsageSettings;
 }
 
 interface CacheEntry {
@@ -82,6 +84,7 @@ export class UsageMonitor {
   private readonly adapterById = new Map<string, QuotaAdapter>();
   private readonly now: () => number;
   private readonly createRequester: (signal: AbortSignal) => GetJson;
+  private settings: UsageSettings;
   /** Per-process (per-extension-instance) salt for credential fingerprints. */
   private readonly salt = randomUUID();
 
@@ -102,10 +105,25 @@ export class UsageMonitor {
     for (const adapter of options.adapters) this.adapterById.set(adapter.id, adapter);
     this.now = options.now ?? (() => Date.now());
     this.createRequester = options.createRequester ?? ((signal) => createGetJson(DEFAULT_HTTP_LIMITS, signal));
+    this.settings = options.settings ?? { ...DEFAULT_USAGE_SETTINGS };
   }
 
   get hasSession(): boolean {
     return this.session !== undefined;
+  }
+
+  /** Apply settings immediately, updating the footer and poll schedule in place. */
+  setSettings(settings: UsageSettings): void {
+    const footerWasOff = this.settings.footerFormat === "off";
+    this.settings = { ...settings };
+    if (this.pollTimer !== undefined) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = undefined;
+    }
+    void this.renderFooter();
+    if (!this.autoNetworkingAllowed()) return;
+    if (footerWasOff) void this.refreshActive("session");
+    this.schedulePoll();
   }
 
   adapterFor(providerId: string): QuotaAdapter | undefined {
@@ -131,7 +149,7 @@ export class UsageMonitor {
   /**
    * Session lifecycle entry point. Resets per-session state (timers, in-flight
    * controller, generation), refreshes the active provider, and starts the
-   * five-minute poll. Idempotent; automatic work is TUI-only and offline-aware.
+   * configured poll. Idempotent; automatic work is TUI-only and offline-aware.
    */
   startSession(session: MonitorSession, activeProviderId: string | undefined): void {
     this.stopSessionWork();
@@ -163,7 +181,7 @@ export class UsageMonitor {
 
   /** agent_settled: opportunistic refresh of fresh-enough data only. */
   async onAgentSettled(): Promise<void> {
-    if (!this.autoNetworkingAllowed()) return;
+    if (!this.settings.refreshAfterTurn || !this.autoNetworkingAllowed()) return;
     const providerId = this.activeProviderId;
     if (providerId === undefined) return;
     const cached = await this.serveCached(providerId);
@@ -198,16 +216,23 @@ export class UsageMonitor {
   }
 
   private autoNetworkingAllowed(): boolean {
-    return this.session !== undefined && this.session.mode === "tui" && !isOffline();
+    return this.session !== undefined
+      && this.session.mode === "tui"
+      && this.settings.footerFormat !== "off"
+      && !isOffline();
   }
 
   private schedulePoll(): void {
     if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
+    if (this.settings.pollIntervalMinutes === 0) {
+      this.pollTimer = undefined;
+      return;
+    }
     // unref: the poll must never keep a process (or test run) alive by itself.
     const timer = setTimeout(() => {
       this.pollTimer = undefined;
       void this.pollTick();
-    }, POLL_INTERVAL_MS);
+    }, this.settings.pollIntervalMinutes * 60_000);
     timer.unref?.();
     this.pollTimer = timer;
   }
@@ -351,7 +376,11 @@ export class UsageMonitor {
 
   private async renderFooter(): Promise<void> {
     const session = this.session;
-    if (session === undefined || session.mode !== "tui" || isOffline()) return;
+    if (session === undefined || session.mode !== "tui") return;
+    if (this.settings.footerFormat === "off" || isOffline()) {
+      session.setStatus(STATUS_KEY, undefined);
+      return;
+    }
     const providerId = this.activeProviderId;
     const adapter = providerId !== undefined ? this.adapterById.get(providerId) : undefined;
     if (adapter === undefined || providerId === undefined || !session.gateway.isConfigured(providerId)) {
@@ -361,14 +390,18 @@ export class UsageMonitor {
     const cached = await this.serveCached(providerId);
     if (cached !== undefined) {
       const error = this.lastError.get(providerId);
-      session.setStatus(STATUS_KEY, formatFooterText(cached, { now: this.now(), stale: error !== undefined }));
+      session.setStatus(STATUS_KEY, formatFooterText(cached, {
+        now: this.now(),
+        stale: error !== undefined,
+        format: this.settings.footerFormat,
+      }));
       return;
     }
     const error = this.lastError.get(providerId);
     if (error !== undefined) {
       const back = this.backoff.get(providerId);
       const retryIn = back !== undefined && back.until > this.now() ? back.until - this.now() : undefined;
-      session.setStatus(STATUS_KEY, formatFooterError(error.kind, retryIn));
+      session.setStatus(STATUS_KEY, formatFooterError(error.kind, retryIn, this.settings.footerFormat));
       return;
     }
     // First refresh still in flight: no status yet.

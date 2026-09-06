@@ -50,13 +50,38 @@ Run `/usage` in Pi (TUI mode) for a scrollable, tabbed dashboard: one tab per co
 
 The footer indicator is additive (`setStatus`, never a footer replacement) and shows, for the active provider only: remaining allowance, reset countdown where known, data age, and explicit `stale` / error labels.
 
+## Settings
+
+Run `/usage-settings` to edit global or trusted project settings. Changes apply immediately and are saved to:
+
+- Global: `~/.pi/agent/pi-usage.json`
+- Project: `<cwd>/.pi/pi-usage.json` (overrides global values and is read only for trusted projects)
+
+The files can also be edited directly; run `/reload` afterward. Unknown or invalid values are ignored with a warning.
+
+```json
+{
+  "footerFormat": "full",
+  "pollIntervalMinutes": 5,
+  "refreshAfterTurn": true
+}
+```
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `footerFormat` | `"full"`, `"compact"`, `"off"` | `"full"` |
+| `pollIntervalMinutes` | `0`, `1`, `5`, `15`, `30` (`0` disables polling) | `5` |
+| `refreshAfterTurn` | boolean | `true` |
+
+`compact` shows only the status light and remaining value. `off` removes the footer and its automatic network activity; manual `/usage` refreshes remain available.
+
 ## Automatic refresh schedule
 
 All automatic networking is TUI-only and suppressed under `PI_OFFLINE`; print/JSON/RPC modes stay silent.
 
 - **Session start and model switch:** refresh the active provider (model switches within the same provider do not re-fetch — the quota is unchanged).
-- **After each turn** (`agent_settled`): refresh only when cached data is ≥ 60 s old or a reset time has passed.
-- **Every 5 minutes:** poll the active provider only. No provider is background-polled while inactive.
+- **After each turn** (`agent_settled`): when enabled, refresh only when cached data is ≥ 60 s old or a reset time has passed.
+- **Periodic poll:** every 5 minutes by default; configurable or disabled. Only the active provider is polled.
 - Overlapping command/event/timer requests are deduplicated; failed refreshes back off exponentially (30 s doubling, 5 min cap) and valid server `Retry-After` guidance is honored.
 - `/usage` bypasses cache age but respects server-imposed backoff.
 

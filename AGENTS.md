@@ -8,7 +8,8 @@ Repo-scoped rules for agents working in `pi-usage`. The global rules in
 `pi-usage` is an independently implemented, read-only Pi extension package
 that reports provider subscription quota (Codex, OpenCode Go, Z.ai, Kimi,
 Grok) and OpenRouter key allowance through a `/usage` command and an additive
-footer indicator.
+footer indicator. Package settings are managed through `/usage-settings` and
+package-owned `pi-usage.json` files; project overrides must remain trust-gated.
 
 Do not widen compatibility claims beyond the inspected Pi 0.85.1 API.
 
@@ -63,6 +64,12 @@ project **Pi Usage** (`fu8gwyw0lnnjl67qz5314gw5`):
 | Pre-Phase 3 — `/usage` visual refinement | `l2gmrcwc5c2r8acgsb06s68l` | #5 |
 | Phase 3 — Grok subscription billing | `mj3yks2izvt70btmyvge73i4` | #3 |
 | Phase 4 — Automatic footer and lifecycle hardening | `e9t8jlijlktz0n8zvctlp19d` | #4 |
+
+Post-v1 standalone work:
+
+| Task | ID | Number |
+| --- | --- | --- |
+| Package settings mechanism | `kq5v82gmkqmr8nna88lj7odg` | #6 |
 
 Do not re-import or create duplicate phase tasks; always reuse these IDs.
 Add subtasks only when a step needs independent ownership, blocking, or
