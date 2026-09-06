@@ -20,19 +20,25 @@ Providers without credentials configured in Pi are omitted entirely. One account
 
 Requires Node.js ≥ 24.16 and Pi ≥ 0.85.1.
 
-The package is distributed from this Git repository (no npm package). Move a pinned install to a newer ref with `pi install git:github.com/singh-gur/pi-usage@<ref>`; unpinned installs are reconciled by `pi update --extensions`.
+Install from npm (recommended; tagged releases, updated via `pi update --extensions`):
 
-Install as a Pi package (latest commit):
+```
+pi install npm:@singh-gur/pi-usage
+```
+
+Or pin to a version:
+
+```
+pi install npm:@singh-gur/pi-usage@1.2.0
+```
+
+Or install from this Git repository (latest commit, unpinned installs are reconciled by `pi update --extensions`):
 
 ```
 pi install git:github.com/singh-gur/pi-usage
 ```
 
-Or pin to a known release (tags `pi-usage-phase-1` … `pi-usage-phase-4` are published checkpoints):
-
-```
-pi install git:github.com/singh-gur/pi-usage@pi-usage-phase-4
-```
+Tags `pi-usage-phase-1` … `pi-usage-phase-4` are published development checkpoints; `v*` tags mark npm releases.
 
 The `https://` protocol URL form works too: `pi install https://github.com/singh-gur/pi-usage`. Review the source before installing — Pi packages run with full system access.
 
