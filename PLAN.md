@@ -404,7 +404,7 @@ Automated checks and user confirmation of the visual result. Kaneo task `l2gmrcw
 ### Phase 3 — Grok subscription billing
 
 - **Objective:** Complete six-provider support with accurately labelled Grok coding-credit allowance.
-- **Status:** Not Started
+- **Status:** Complete (accepted 2026-09-06)
 - **Complexity:** High
 - **Estimated Time:** 60–90 minutes
 - **Prerequisites:** User-accepted phase 2.
@@ -421,11 +421,16 @@ Automated checks and user confirmation of the visual result. Kaneo task `l2gmrcw
 
 #### Implementation Tasks
 
-- [ ] **Protocol verification:** Check the cited official Grok billing client and pinned reference for request headers and identity lookup conventions. This is bounded to the documented adapter requests; stop if a material contract differs rather than inventing a new auth path.
-- [ ] **OAuth and identity:** Reject non-OAuth resolution, query and validate identity, then issue approved billing GETs using the same runtime auth. Done when invalid identity prevents billing requests and API credentials never reach subscription billing.
-- [ ] **Billing normalization:** Prefer reported percentage/current period; use only validated legacy amount fields as fallback. Keep optional monthly failure separate from valid primary results. Done when valid partial data remains usable and missing percentages never become invented zero usage.
-- [ ] **Command integration:** Add the Grok result with an explicit coding-credit label and relevant period/reset information. Done when the view does not claim to represent all Grok chat usage.
-- [ ] **Tests:** Cover API-key rejection, invalid identity, modern and legacy shapes, absent percentages, malformed monetary wrappers, required/optional billing failures, and timeout behavior. Done when all paths are checked with synthetic payloads.
+- [x] **Protocol verification:** Check the cited official Grok billing client and pinned reference for request headers and identity lookup conventions. This is bounded to the documented adapter requests; stop if a material contract differs rather than inventing a new auth path.
+  - Verified against xai-org/grok-build at main: `billing.rs` (credits `GET {base}/billing?format=credits`, headers `Authorization`/`X-XAI-Token-Auth: xai-grok-cli`/`x-userid`/`x-grok-client-version`/`x-grok-client-mode`; modern `creditUsagePercent`/`currentPeriod` vs legacy `used`/`monthlyLimit`/`billingPeriod*` Cent wrappers; proto3 zero omission documented on the official `Cent` struct) and `auth/manager/enrichment.rs` + `auth/model.rs` (`GET {base}/user` → camelCase `UserInfo.userId`, non-empty required; same header set without `x-userid`). Proxy base pinned `https://cli-chat-proxy.grok.com/v1` (`xai-grok-workspace/src/handle.rs`); client version crate at 1.0.16 (adapter protocol constant, not this package's version). Cross-checked against the pinned pi-subscription-usage grok reference; no material contract difference found.
+- [x] **OAuth and identity:** Reject non-OAuth resolution, query and validate identity, then issue approved billing GETs using the same runtime auth. Done when invalid identity prevents billing requests and API credentials never reach subscription billing.
+  - `src/providers/grok.ts`: non-OAuth resolution rejected before any request (tested); `/v1/user` must return a printable-ASCII, bounded, non-empty `userId` or billing is never issued (tested incl. missing/empty/non-string/overlong); identity/billing use the same runtime OAuth bearer with the verified `x-userid` added on billing only.
+- [x] **Billing normalization:** Prefer reported percentage/current period; use only validated legacy amount fields as fallback. Keep optional monthly failure separate from valid primary results. Done when valid partial data remains usable and missing percentages never become invented zero usage.
+  - `creditUsagePercent` accepted only in 0–100; legacy Cent pair derives percent + USD used/limit/remaining; proto3 omission yields 0% only when a real credits config has a current period and no usage field at all (absent, never present-but-invalid); unified-billing accounts and unusable credits trigger the optional legacy monthly query; its failure leaves a valid credits result with a partial notice and is fatal only when credits exposed no quota.
+- [x] **Command integration:** Add the Grok result with an explicit coding-credit label and relevant period/reset information. Done when the view does not claim to represent all Grok chat usage.
+  - Adapter registered as Pi's `xai` provider; domain label "Grok coding credits"; window labels derive from `currentPeriod.type` (weekly/monthly) and reset from `currentPeriod.end`/`billingPeriodEnd`.
+- [x] **Tests:** Cover API-key rejection, invalid identity, modern and legacy shapes, absent percentages, malformed monetary wrappers, required/optional billing failures, and timeout behavior. Done when all paths are checked with synthetic payloads.
+  - 17 new tests (94 → 111): API-key rejection with zero requests, identity gating and header conventions, weekly/monthly period labels, legacy cent derivation, proto3 zero, present-but-invalid/out-of-range percent, malformed cents, unified-billing dual windows, optional-monthly isolation, fatal monthly failure, config nullability. `resolveQuotaAuth` gained an `allowedProviderOrigin` (xai's built-in `api.x.ai` model-API origin accepted only without an auth-level override; custom overrides must still match the quota origin) with tests; six-provider extension render covers tab isolation and identity-before-billing ordering.
 
 #### Execution Tracking Rules
 
@@ -433,10 +438,10 @@ Apply the shared rules. Record real-account/product uncertainty until the user's
 
 #### Verification
 
-- [ ] `pnpm test`, `pnpm run typecheck`, and `pnpm run pack:check` pass.
-- [ ] Failure of optional monthly data does not hide valid credit-period data.
-- [ ] Every network request is read-only and origin-restricted; no billing mutations or additional authentication stores are used.
-- [ ] User confirms the result matches the intended Grok account and coding-credit product.
+- [x] `pnpm test`, `pnpm run typecheck`, and `pnpm run pack:check` pass. (111/111 tests; tarball lists only src + manifests)
+- [x] Failure of optional monthly data does not hide valid credit-period data. (Covered by provider-level tests; monthly endpoint is skipped entirely when credits quota is usable and the account is not unified-billing.)
+- [x] Every network request is read-only and origin-restricted; no billing mutations or additional authentication stores are used. (GET-only shared HTTP layer unchanged; three fixed GET endpoints under `https://cli-chat-proxy.grok.com`; credentials only via Pi's runtime OAuth resolution.)
+- [x] User confirms the result matches the intended Grok account and coding-credit product. (Amended per approved gate change: free-plan live smoke test confirmed the OAuth→identity→billing flow and proto3 rendering; paid-account comparison deferred — see execution notes.)
 
 #### Completion Gate
 
@@ -448,7 +453,16 @@ Six-provider command with an isolated Grok identity/billing integration.
 
 #### Execution Notes
 
-None.
+Implementation complete (2026-09-05); awaiting user confirmation of Grok account/product semantics.
+
+- `src/auth.ts` was modified after all (the plan's file table anticipated this): `resolveQuotaAuth` accepts an optional `allowedProviderOrigin`. Pi's built-in `xai` provider base URL is the model API origin (`api.x.ai`), while quota lives on the CLI proxy (`cli-chat-proxy.grok.com`); the built-in origin is accepted only when Pi resolved no auth-level base-URL override, and custom overrides must still match the quota origin. All five existing providers pass `undefined` and behave exactly as before.
+- `x-grok-client-version` is pinned to the official grok CLI version crate value (1.0.16) as an adapter protocol constant; `x-grok-client-mode` mirrors the official CLI's interactive/headless TTY distinction (metric label only, per grok-build source).
+- Unified-billing accounts (`isUnifiedBillingUser: true`) always trigger the optional monthly probe, matching the pinned reference's observation that such accounts may expose quota only on the legacy monthly shape; credits and monthly windows render separately and are never merged.
+- Deliberately not rendered (not in approved scope): `subscriptionTier`, `onDemandCap`/`onDemandUsed`, `prepaidBalance`, and history entries.
+- Residual product uncertainty until the user's live comparison: exact percent semantics for unified-billing accounts and whether the user's plan reports the credits or legacy shape.
+- **Live free-plan smoke test (2026-09-05, user-reported):** Pi xai OAuth succeeded on a free plan; `/usage` rendered a valid credits result (weekly period, 100% left, reset countdown). Model calls on the same account fail with the model API's own 402 credit gate. Approved disposition (user decision): keep the behavior — the free plan's billing payload (credits shape with a current period and omitted zero usage fields) is indistinguishable from a paid account sitting at 0% after reset, so `/usage` shows the period as 100% remaining, matching the official Grok CLI's documented proto3 interpretation. Known limitation: for subscription-less accounts the coding-credit window does not predict model-call availability; the 402 is Pi's separate model-call error surface. The deferred paid-account comparison remains the unblock for validating consumed-percent rendering.
+- Phase accepted by the user on 2026-09-06 with the deferred paid-account comparison recorded above. Checkpoint commit + tag `pi-usage-phase-3` authorized and completed.
+- **Approved gate amendment (2026-09-05, user decision):** the user has no paid Grok subscription, so the "user confirms the result matches the intended Grok account" check is amended to a two-step acceptance: (1) free-account smoke test — user attempts Pi xai OAuth and confirms `/usage` shows an explicit sanitized Grok error state (or correct tab omission when unconfigable); (2) explicit phase acceptance, with the live paid-account dashboard comparison recorded as deferred. Unblock condition for the deferred check: a Grok subscription becomes available and the user compares `/usage` against the Grok coding-credit dashboard.
 
 ### Phase 4 — Automatic footer and lifecycle hardening
 

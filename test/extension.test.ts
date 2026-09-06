@@ -75,13 +75,13 @@ function makeCtx(options: {
   return { ctx, handles: customHandlesCurrent, notifications };
 }
 
-function installFetch(routes: Record<string, () => Response | Promise<Response>>, log: Array<{ url: string; headers: Record<string, string> }>) {
+function installFetch(routes: Record<string, (url: string) => Response | Promise<Response>>, log: Array<{ url: string; headers: Record<string, string> }>) {
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     log.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
     const route = routes[new URL(url).host];
     if (!route) throw new Error(`unexpected fetch: ${url}`);
-    return route();
+    return route(url);
   }) as typeof fetch;
 }
 
@@ -411,7 +411,7 @@ const CODEX_JWT = `${Buffer.from(JSON.stringify({ alg: "RS256" })).toString("bas
   JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-9" } }),
 ).toString("base64url")}.sig`;
 
-const FIVE_PROVIDER_BODIES = {
+const SIX_PROVIDER_BODIES = {
   "opencode.ai": () => new Response(GO_BODY, { status: 200 }),
   "openrouter.ai": () => new Response(OR_BODY, { status: 200 }),
   "chatgpt.com": () =>
@@ -445,6 +445,20 @@ const FIVE_PROVIDER_BODIES = {
       }),
       { status: 200 },
     ),
+  "cli-chat-proxy.grok.com": (url: string) => {
+    const path = new URL(url).pathname + new URL(url).search;
+    const body = path.startsWith("/v1/user")
+      ? { userId: "grok-user-1" }
+      : path.startsWith("/v1/billing") && path.includes("format=credits")
+        ? {
+            config: {
+              creditUsagePercent: 33.5,
+              currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: new Date(Date.now() + 86_400_000).toISOString() },
+            },
+          }
+        : { config: null };
+    return new Response(JSON.stringify(body), { status: 200 });
+  },
 };
 
 const ALL_CONFIGURED = {
@@ -453,11 +467,12 @@ const ALL_CONFIGURED = {
   "openai-codex": true,
   "kimi-coding": true,
   zai: true,
+  xai: true,
 };
 
-test("extension: five providers render independently without conflation", async () => {
+test("extension: six providers render independently without conflation", async () => {
   const harness = setupExtension();
-  installFetch(FIVE_PROVIDER_BODIES, harness.fetchCalls);
+  installFetch(SIX_PROVIDER_BODIES, harness.fetchCalls);
   const { ctx, handles } = makeCtx({
     mode: "tui",
     configured: ALL_CONFIGURED,
@@ -467,8 +482,9 @@ test("extension: five providers render independently without conflation", async 
       "openai-codex": CODEX_JWT,
       "kimi-coding": "k",
       zai: "k",
+      xai: "grok-oauth-token",
     },
-    oauthByKey: { "openai-codex": true },
+    oauthByKey: { "openai-codex": true, xai: true },
   });
 
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
@@ -494,6 +510,20 @@ test("extension: five providers render independently without conflation", async 
   handles[0]!.component.handleInput("\x1b[C"); // Z.AI
   lines = handles[0]!.component.render(100).join("\n");
   assert.ok(/5-hour/.test(lines) && /75% left/.test(lines));
+
+  handles[0]!.component.handleInput("\x1b[C"); // Grok
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(lines.includes("[Grok]"));
+  assert.ok(lines.includes("Grok coding credits"));
+  assert.ok(/current period \(weekly\)/.test(lines) && /66.5% left/.test(lines));
+
+  // Grok: identity ran before billing and carried the verified user id.
+  const grokCalls = harness.fetchCalls.filter((c) => c.url.includes("cli-chat-proxy.grok.com"));
+  assert.ok(grokCalls.length >= 2);
+  assert.ok(grokCalls[0]!.url.endsWith("/v1/user"));
+  assert.ok(grokCalls[1]!.url.includes("format=credits"));
+  assert.equal(grokCalls[1]!.headers["x-userid"], "grok-user-1");
+  assert.equal(grokCalls[0]!.headers.authorization, "Bearer grok-oauth-token");
 
   // Codex request used the runtime-derived account header.
   const codexCall = harness.fetchCalls.find((c) => c.url.includes("chatgpt.com"));

@@ -123,6 +123,34 @@ test("auth: provider without any base URL (opencode-go shape) is accepted", asyn
   assert.deepEqual(result, { apiKey: "k", oauth: false });
 });
 
+test("auth: built-in provider origin is accepted only without an auth-level override", async () => {
+  // xai shape: Pi's built-in model API origin differs from the quota origin.
+  const QUOTA = "https://cli-chat-proxy.grok.com";
+  const ok = await resolveQuotaAuth(
+    gateway({
+      configured: true,
+      resolved: { auth: { apiKey: "tok" }, source: "OAuth" },
+      providerBaseUrl: "https://api.x.ai/v1",
+    }),
+    "xai",
+    QUOTA,
+    "https://api.x.ai",
+  );
+  assert.deepEqual(ok, { apiKey: "tok", oauth: true });
+
+  const refused = await resolveQuotaAuth(
+    gateway({
+      configured: true,
+      resolved: { auth: { apiKey: "tok", baseUrl: "https://api.x.ai/v1" }, source: "OAuth" },
+      providerBaseUrl: "https://api.x.ai/v1",
+    }),
+    "xai",
+    QUOTA,
+    "https://api.x.ai",
+  );
+  assert.ok(refused instanceof UsageError && refused.kind === "auth", "auth-level override must still match the quota origin");
+});
+
 // ----------------------------------------------------------------------- http
 
 type FetchCall = { url: string; headers: Record<string, string>; opts: RequestInit };

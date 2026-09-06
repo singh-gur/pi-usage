@@ -17,14 +17,16 @@ import { openrouterAdapter } from "./providers/openrouter.ts";
 import { codexAdapter } from "./providers/codex.ts";
 import { kimiAdapter } from "./providers/kimi.ts";
 import { zaiAdapter } from "./providers/zai.ts";
+import { grokAdapter } from "./providers/grok.ts";
 
-/** Fixed supported-provider list (grows in later phases). */
+/** Fixed supported-provider list. */
 const ADAPTERS: readonly QuotaAdapter[] = [
   opencodeGoAdapter,
   openrouterAdapter,
   codexAdapter,
   kimiAdapter,
   zaiAdapter,
+  grokAdapter,
 ];
 
 /** Whole-provider bound, including waiting for auth resolution. */
@@ -48,7 +50,7 @@ async function refreshProvider(
 ): Promise<ProviderUsage> {
   const startedAt = Date.now();
   const work = (async () => {
-    const auth = await resolveQuotaAuth(gateway, adapter.id, adapter.officialOrigin);
+    const auth = await resolveQuotaAuth(gateway, adapter.id, adapter.officialOrigin, adapter.allowedProviderOrigin);
     if (auth instanceof UsageError) return errorUsage(adapter, auth, startedAt);
     return await adapter.fetchQuota(auth, createGetJson(DEFAULT_HTTP_LIMITS, signal));
   })();

@@ -528,3 +528,223 @@ test("zai: adapter sends the raw key without a Bearer prefix", async () => {
   assert.equal(calls[0]!.url, "https://api.z.ai/api/monitor/usage/quota/limit");
   assert.equal(calls[0]!.headers.authorization, "zai.rawkey");
 });
+
+// ----------------------------------------------------------------------- Grok
+
+import { grokAdapter, interpretUserId } from "../src/providers/grok.ts";
+
+/** Scripted per-endpoint getJson with call recording. */
+function grokGetJson(
+  responses: { user?: unknown; credits?: unknown; monthly?: unknown },
+  opts: { userStatus?: number; creditsStatus?: number; monthlyStatus?: number; monthlyThrows?: Error } = {},
+) {
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const getJson = async (url: string, headers: Record<string, string>) => {
+    calls.push({ url, headers });
+    if (url.includes("/v1/user")) return { status: opts.userStatus ?? 200, data: responses.user };
+    if (url.includes("format=credits")) return { status: opts.creditsStatus ?? 200, data: responses.credits };
+    if (opts.monthlyThrows) throw opts.monthlyThrows;
+    return { status: opts.monthlyStatus ?? 200, data: responses.monthly };
+  };
+  return { getJson, calls };
+}
+
+const GROK_USER = { userId: "user-abc-123", email: "x@y.z" };
+const GROK_CREDITS_MODERN = {
+  config: {
+    creditUsagePercent: 42.5,
+    currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: ISO, end: ISO },
+  },
+};
+
+test("grok: non-OAuth resolution is rejected before any request", async () => {
+  const { getJson, calls } = grokGetJson({ user: GROK_USER, credits: GROK_CREDITS_MODERN });
+  await expectAsyncError("auth", () => grokAdapter.fetchQuota({ apiKey: "sk-key", oauth: false }, getJson));
+  assert.equal(calls.length, 0, "API keys must never reach Grok endpoints");
+});
+
+async function expectAsyncError(kind: string, fn: () => Promise<unknown>): Promise<UsageError> {
+  try {
+    await fn();
+  } catch (error) {
+    assert.ok(error instanceof UsageError, `expected UsageError, got ${String(error)}`);
+    assert.equal(error.kind, kind);
+    return error;
+  }
+  assert.fail("expected a throw");
+}
+
+test("grok: identity is fetched first and gates billing requests", async () => {
+  const { getJson, calls } = grokGetJson({ user: GROK_USER, credits: GROK_CREDITS_MODERN });
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0]!.url.endsWith("/v1/user"));
+  assert.ok(calls[1]!.url.endsWith("/v1/billing?format=credits"));
+  assert.equal(calls[1]!.headers["x-userid"], "user-abc-123");
+  assert.equal(calls[1]!.headers["x-xai-token-auth"], "xai-grok-cli");
+  assert.equal(calls[0]!.headers.authorization, "Bearer tok");
+  assert.ok(!("x-userid" in calls[0]!.headers), "identity request carries no user id");
+  assert.equal(calls[0]!.headers["x-grok-client-version"], "1.0.16");
+  assert.equal(result.windows[0]!.usedPercent, 42.5);
+  assert.equal(result.windows[0]!.label, "current period (weekly)");
+  assert.equal(result.domainLabel, "Grok coding credits");
+});
+
+test("grok: invalid identity prevents billing requests", async () => {
+  for (const bad of [undefined, { userId: "" }, { userId: 42 }, { userId: "a\tb" }, { userId: "x".repeat(257) }, null]) {
+    const { getJson, calls } = grokGetJson({ user: bad, credits: GROK_CREDITS_MODERN });
+    await expectAsyncError("unsupported", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
+    assert.equal(calls.length, 1, `billing must not run for identity ${JSON.stringify(bad)}`);
+  }
+});
+
+test("grok: identity endpoint auth failure is an auth error before billing", async () => {
+  const { getJson, calls } = grokGetJson({ user: GROK_USER }, { userStatus: 401 });
+  await expectAsyncError("auth", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
+  assert.equal(calls.length, 1);
+});
+
+test("grok: modern percent with monthly period type", async () => {
+  const { getJson } = grokGetJson({
+    user: GROK_USER,
+    credits: {
+      config: {
+        creditUsagePercent: 7,
+        currentPeriod: { type: "USAGE_PERIOD_TYPE_MONTHLY", start: ISO, end: ISO },
+      },
+    },
+  });
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  assert.equal(result.windows.length, 1);
+  assert.equal(result.windows[0]!.label, "current period (monthly)");
+});
+
+test("grok: legacy cent pair inside credits derives percent and USD values", async () => {
+  const { getJson } = grokGetJson({
+    user: GROK_USER,
+    credits: {
+      config: {
+        used: { val: 1234 },
+        monthlyLimit: { val: 2000 },
+        billingPeriodEnd: ISO,
+      },
+    },
+  });
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  const window = result.windows[0]!;
+  assert.equal(window.usedPercent, 61.7);
+  assert.equal(window.used!.value, 12.34);
+  assert.equal(window.limit!.value, 20);
+  assert.equal(window.remaining!.value, 7.66);
+  assert.equal(window.used!.unit, "USD");
+  assert.equal(window.resetsAt, NOW + 3_600_000);
+});
+
+test("grok: proto3 zero omission — credits config with a period and no usage fields is 0%", async () => {
+  const { getJson } = grokGetJson({
+    user: GROK_USER,
+    credits: { config: { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: ISO } } },
+  });
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  assert.equal(result.windows[0]!.usedPercent, 0);
+});
+
+test("grok: present-but-invalid percent never becomes zero", async () => {
+  const { getJson } = grokGetJson({
+    user: GROK_USER,
+    credits: { config: { creditUsagePercent: "bogus", currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" } } },
+  });
+  // No usable credits window → optional monthly probe runs and also yields nothing.
+  await expectAsyncError("unsupported", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
+});
+
+test("grok: out-of-range percent and malformed cents stay unknown", async () => {
+  assert.equal(interpretUserId({ userId: "ok" }), "ok");
+  const { getJson } = grokGetJson({
+    user: GROK_USER,
+    credits: {
+      config: {
+        creditUsagePercent: 150,
+        used: { val: "nope" },
+        monthlyLimit: -5,
+        currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" },
+      },
+    },
+  });
+  // percent present-but-invalid, used/monthlyLimit present-but-invalid → no
+  // proto3 omission case → falls through to the optional monthly probe.
+  await expectAsyncError("unsupported", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
+});
+
+test("grok: unified billing probes monthly; both windows stay separate", async () => {
+  const { getJson, calls } = grokGetJson({
+    user: GROK_USER,
+    credits: {
+      config: {
+        creditUsagePercent: 10,
+        currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: ISO },
+        isUnifiedBillingUser: true,
+      },
+    },
+    monthly: { config: { used: { val: 500 }, monthlyLimit: { val: 1000 }, billingPeriodEnd: ISO } },
+  });
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  assert.equal(calls.length, 3);
+  assert.ok(calls[2]!.url.endsWith("/v1/billing"));
+  assert.equal(result.windows.length, 2);
+  assert.equal(result.windows[0]!.label, "current period (weekly)");
+  assert.equal(result.windows[1]!.label, "monthly");
+  assert.equal(result.windows[1]!.usedPercent, 50);
+});
+
+test("grok: optional monthly failure does not hide a valid credits result", async () => {
+  // Unified billing forces the monthly probe; its failure leaves the valid
+  // credits window intact with a partial notice.
+  const { getJson, calls } = grokGetJson(
+    {
+      user: GROK_USER,
+      credits: { config: { creditUsagePercent: 42.5, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: ISO }, isUnifiedBillingUser: true } },
+    },
+    { monthlyThrows: new UsageError("request", "Grok monthly billing endpoint returned HTTP 500") },
+  );
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  assert.equal(result.windows.length, 1);
+  assert.equal(result.windows[0]!.usedPercent, 42.5);
+  assert.ok(result.partialNotice);
+  assert.equal(calls.length, 3);
+});
+
+test("grok: valid non-unified credits skip the monthly endpoint entirely", async () => {
+  const { getJson, calls } = grokGetJson({ user: GROK_USER, credits: GROK_CREDITS_MODERN });
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  assert.equal(calls.length, 2, "no monthly request when credits quota is usable");
+  assert.equal(result.partialNotice, undefined);
+});
+
+test("grok: monthly failure is fatal only when credits exposed no quota", async () => {
+  const { getJson } = grokGetJson({ user: GROK_USER, credits: { config: {} } }, { monthlyStatus: 500 });
+  await expectAsyncError("request", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
+});
+
+test("grok: unusable credits fall back to a valid legacy monthly result", async () => {
+  const { getJson } = grokGetJson({
+    user: GROK_USER,
+    credits: { config: null },
+    monthly: { config: { used: { val: 250 }, monthlyLimit: { val: 1000 }, billingPeriodEnd: ISO } },
+  });
+  const result = await grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson);
+  assert.equal(result.windows.length, 1);
+  assert.equal(result.windows[0]!.label, "monthly");
+  assert.equal(result.error, undefined);
+});
+
+test("grok: billing 403 after valid identity is an auth error", async () => {
+  const { getJson, calls } = grokGetJson({ user: GROK_USER }, { creditsStatus: 403 });
+  await expectAsyncError("auth", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
+  assert.equal(calls.length, 2);
+});
+
+test("grok: null and non-object config responses are not usable windows", async () => {
+  const { getJson } = grokGetJson({ user: GROK_USER, credits: null, monthly: null });
+  await expectAsyncError("unsupported", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
+});

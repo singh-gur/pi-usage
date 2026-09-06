@@ -56,6 +56,8 @@ export async function resolveQuotaAuth(
   gateway: AuthGateway,
   providerId: string,
   officialOrigin: string,
+  /** Built-in provider base-URL origin accepted when no auth-level override exists. */
+  allowedProviderOrigin?: string,
 ): Promise<ResolvedQuotaAuth | UsageError> {
   if (!gateway.isConfigured(providerId)) {
     return new UsageError("not-configured", "No credentials configured for this provider");
@@ -74,10 +76,17 @@ export async function resolveQuotaAuth(
     return new UsageError("auth", "No usable credentials resolved for this provider");
   }
   // Effective routing = auth-level base URL override, else composed provider base URL.
-  const effectiveBaseUrl = resolved.auth.baseUrl ?? gateway.providerInfo(providerId)?.baseUrl;
+  const authOverride = resolved.auth.baseUrl;
+  const effectiveBaseUrl = authOverride ?? gateway.providerInfo(providerId)?.baseUrl;
   if (effectiveBaseUrl !== undefined) {
     const origin = originOf(effectiveBaseUrl);
-    if (origin !== officialOrigin) {
+    // Custom overrides must point at the official quota origin; without an
+    // override, Pi's built-in provider origin is also acceptable when the
+    // adapter declares one (same provider, different official endpoints).
+    const accepted =
+      origin === officialOrigin ||
+      (authOverride === undefined && allowedProviderOrigin !== undefined && origin === allowedProviderOrigin);
+    if (!accepted) {
       return new UsageError(
         "auth",
         "Provider routes through a custom base URL; quota lookup refused",

@@ -82,6 +82,12 @@ export interface QuotaAdapter {
   name: string;
   /** Official origin credentials may be routed to; custom proxies are rejected. */
   officialOrigin: string;
+  /**
+   * Built-in provider base-URL origin that differs from `officialOrigin`
+   * (e.g. xai's model API vs billing proxy). Accepted only when Pi resolved
+   * no auth-level override; custom overrides must still match officialOrigin.
+   */
+  allowedProviderOrigin?: string;
   domainLabel: string;
   fetchQuota(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ProviderUsage>;
 }
