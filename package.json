@@ -1,16 +1,26 @@
 {
-  "name": "pi-usage",
+  "name": "@singh-gur/pi-usage",
   "version": "1.2.0",
-  "private": true,
   "description": "Pi extension: /usage command and indicator for provider subscription quota and OpenRouter key allowance.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.1.2",
   "engines": {
     "node": ">=24.16.0"
   },
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "usage",
+    "quota",
+    "codex",
+    "opencode",
+    "kimi",
+    "zai",
+    "grok",
+    "github-copilot",
+    "openrouter"
   ],
   "files": [
     "src"
