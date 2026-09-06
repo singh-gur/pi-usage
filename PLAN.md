@@ -467,7 +467,7 @@ Implementation complete (2026-09-05); awaiting user confirmation of Grok account
 ### Phase 4 — Automatic footer and lifecycle hardening
 
 - **Objective:** Deliver the approved automatic active-provider indicator and finish package usability/verification.
-- **Status:** Not Started
+- **Status:** In Progress (verification passed; awaiting user review)
 - **Complexity:** Medium
 - **Estimated Time:** 60–90 minutes
 - **Prerequisites:** User-accepted phase 3 and six working command integrations.
@@ -486,13 +486,20 @@ Implementation complete (2026-09-05); awaiting user confirmation of Grok account
 
 #### Implementation Tasks
 
-- [ ] **Refresh scheduling:** Implement active-provider startup/model-change refresh, 60-second event-cache behavior on `agent_settled`, and five-minute active-provider polling. Done when fake-clock checks prove inactive providers are not background-polled and manual queries still cover configured providers.
-- [ ] **Cache and backoff:** Deduplicate overlapping refreshes, scope cache by salted in-process auth fingerprint, discard obsolete results, and respect server-imposed backoff. Done when model/account changes cannot expose another account's result and repeated events cannot create request storms.
-- [ ] **Footer:** Use additive status with remaining allowance, known reset countdown, freshness, and explicit stale/error labels. Use shared Codex quota rather than guessing model-specific applicability. Done when status does not replace the built-in footer or another extension's entry and remains readable at narrow widths.
-- [ ] **Lifecycle cleanup:** Clear timers, cancel package-owned requests, discard late auth/network results, and remove package status on shutdown/reload/session replacement. Done when repeated reloads do not accumulate listeners/timers or update disposed UI.
-- [ ] **Mode/offline behavior:** Keep automatic networking TUI-only, custom TUI out of RPC, and print/JSON output silent. Suppress quota requests under `PI_OFFLINE`. Done when mocked mode checks observe no disallowed network/UI activity.
-- [ ] **Documentation:** Update the existing README with local/Git installation, `/usage`, schedules, provider-specific quota scope, Pi-only auth, unsupported/error behavior, runtime requirements, and test commands. Do not create a repository `AGENTS.md` unless separately requested.
-- [ ] **Final checks:** Complete lifecycle, credential-change, duplicate-request, reset-expiry, offline/headless, and narrow-terminal tests; inspect package contents. Done when all approved v1 behaviors have objective checks and no excluded features have appeared.
+- [x] **Refresh scheduling:** Implement active-provider startup/model-change refresh, 60-second event-cache behavior on `agent_settled`, and five-minute active-provider polling. Done when fake-clock checks prove inactive providers are not background-polled and manual queries still cover configured providers.
+  - `src/refresh.ts` `UsageMonitor`: `session_start` refreshes the active provider; `model_select` refreshes when the active provider actually changed; `agent_settled` refreshes only when cached data is ≥60s old or a reset time has passed; a five-minute poll covers only the active provider. Fake-clock (`node:test` mock timers) tests prove inactive providers are never polled and `/usage` still refreshes all configured providers.
+- [x] **Cache and backoff:** Deduplicate overlapping refreshes, scope cache by salted in-process auth fingerprint, discard obsolete results, and respect server-imposed backoff. Done when model/account changes cannot expose another account's result and repeated events cannot create request storms.
+  - In-flight promise map deduplicates command/timer/event requests; cache entries carry a sha256(per-instance salt + credential) fingerprint; `serveCached` re-resolves credentials via Pi before serving so an account change never exposes the previous account's result; generation counter discards results after session replacement, provider switch, or caller timeout; backoff is exponential (30s doubling, 5min cap) with valid server `Retry-After` as the floor (`HttpResponse.retryAfterMs`, captured by a monitor-side wrapper — adapters unchanged); `/usage` bypasses cache age but respects backoff.
+- [x] **Footer:** Use additive status with remaining allowance, known reset countdown, freshness, and explicit stale/error labels. Use shared Codex quota rather than guessing model-specific applicability. Done when status does not replace the built-in footer or another extension's entry and remains readable at narrow widths.
+  - `setStatus("usage", …)` only (never `setFooter`); footer text from the provider's first window — adapters order primary/shared-first, so Codex shows shared quota and never guesses a model-specific group; text form: `<name> 87.5% left · resets 1h 0m · 3m old [· stale]`, error form `<name> <kind> error · retry <window>`; fullest form kept under a 60-column budget (tests).
+- [x] **Lifecycle cleanup:** Clear timers, cancel package-owned requests, discard late auth/network results, and remove package status on shutdown/reload/session replacement. Done when repeated reloads do not accumulate listeners/timers or update disposed UI.
+  - All background work starts from session lifecycle events only (factory registers nothing active); `session_shutdown` bumps the generation, clears the poll timer, aborts the session controller, and clears the status; late completions are discarded (no cache write, no status update); the poll timer is `unref`ed so it can never keep a process alive. Tests cover shutdown clearing, late-result discard, and no further networking/status after shutdown.
+- [x] **Mode/offline behavior:** Keep automatic networking TUI-only, custom TUI out of RPC, and print/JSON output silent. Suppress quota requests under `PI_OFFLINE`. Done when mocked mode checks observe no disallowed network/UI activity.
+  - Monitor gates all automatic work on `mode === "tui"` and `!PI_OFFLINE`; `/usage` returns before any UI/network outside TUI; tests cover rpc sessions and offline suppression.
+- [x] **Documentation:** Update the existing README with local/Git installation, `/usage`, schedules, provider-specific quota scope, Pi-only auth, unsupported/error behavior, runtime requirements, and test commands. Do not create a repository `AGENTS.md` unless separately requested.
+  - `README.md` rewritten: providers table with quota scope, Node/Pi requirements, local + Git-package installation, `/usage` and footer usage, automatic refresh schedule, data/error/safety semantics (including the documented Grok free-plan limitation), and dev commands. No `AGENTS.md` created.
+- [x] **Final checks:** Complete lifecycle, credential-change, duplicate-request, reset-expiry, offline/headless, and narrow-terminal tests; inspect package contents. Done when all approved v1 behaviors have objective checks and no excluded features have appeared.
+  - 131 tests total (added monitor lifecycle/scheduler/backoff/fingerprint/obsolete-discard/offline/mode tests, footer formatter tests, and extension-level session_start/model_select/shutdown/agent_settled checks). `pack:check` lists exactly `package.json`, `README.md`, and `src/*.ts`.
 
 #### Execution Tracking Rules
 
@@ -500,11 +507,11 @@ Apply the shared rules. Capture known API/product limitations instead of marking
 
 #### Verification
 
-- [ ] `pnpm test` passes, including provider, safety, lifecycle, and rendering checks.
-- [ ] `pnpm run typecheck` passes.
-- [ ] `pnpm run pack:check` lists only intended distributable files.
-- [ ] Active model switching, `/usage`, stale data, passed reset times, repeated reloads, and offline behavior work as specified.
-- [ ] Normal editor/footer and other extension status entries remain intact.
+- [x] `pnpm test` passes, including provider, safety, lifecycle, and rendering checks. (131/131)
+- [x] `pnpm run typecheck` passes.
+- [x] `pnpm run pack:check` lists only intended distributable files.
+- [x] Active model switching, `/usage`, stale data, passed reset times, repeated reloads, and offline behavior work as specified. (Fake-clock/monitor tests: provider-change refresh, dedup, reset-expiry forcing refresh, stale-kept-visible; shutdown/late-discard covers reload replacement; offline suppression; `/usage` covered by command tests.)
+- [x] Normal editor/footer and other extension status entries remain intact. (Additive `setStatus("usage", …)` only; asserted that no other key is ever touched and `setFooter` is never used.)
 - [ ] User performs final local end-to-end and provider-dashboard comparisons without exposing credentials to the agent.
 
 #### Completion Gate
@@ -517,7 +524,17 @@ Complete six-provider command, automatic active-provider indicator, tests, and p
 
 #### Execution Notes
 
-None.
+Implementation complete (2026-09-06); awaiting user end-to-end review. Decisions:
+
+- `model_select` triggers a refresh only when the active provider changes. Switching models within one provider does not alter that provider's quota, and Ctrl+P cycling fires `model_select` repeatedly — refreshing per switch would create exactly the request storm the plan forbids.
+- Cached data is served only through `serveCached`, which re-resolves credentials via Pi and compares the salted fingerprint; a sync cache getter cannot detect an account change (first test run caught this). The in-flight dedup window after a mid-flight account switch is a documented corner: the next refresh (≤5 min) replaces the data.
+- Server retry guidance: `http.ts` parses `Retry-After` (seconds or HTTP-date, bounded 1s–1h) into `HttpResponse.retryAfterMs`; the monitor wraps the GET function to capture it from non-2xx responses without touching adapter contracts. Backoff = max(exponential 30s→5min, server guidance).
+- The `/usage` view no longer aborts in-flight refreshes on close — refreshes are shared with the footer via the session controller and are aborted on `session_shutdown` instead. This supersedes the phase 1 note about close-aborts.
+- Footer text uses the provider's first window (`windows[0]`): adapters order primary/shared-first, which gives Codex the shared window and avoids provider-specific parsing in the UI.
+- The poll timer is a recursive `setTimeout` that is `unref`ed: it can never keep a process (or the test run) alive, and `session_shutdown` clears it.
+- `tsconfig.json` lib bumped ES2023 → ES2024 for `Promise.withResolvers` typing in tests; Node ≥24.16 supports it at runtime and no shipped behavior changes.
+- `package.json` needed no changes; the existing `files` allowlist already covers `src/refresh.ts`.
+- Tests run 125 → 131 with the monitor suite using `node:test` mock timers (`apis: ["setTimeout", "Date"]`) and a microtask drain helper; extension tests gained an `events` capture, `setStatus` recording, and `activeProvider` support in the fake context.
 
 ## Phase Dependencies
 

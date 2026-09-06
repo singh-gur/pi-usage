@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import factory from "../src/index.ts";
-import { UsageView, renderUsageLines, type UsageEntry } from "../src/ui.ts";
+import { UsageView, renderUsageLines, formatFooterText, formatFooterError, type UsageEntry } from "../src/ui.ts";
 import type { ProviderUsage } from "../src/types.ts";
 
 // ------------------------------------------------------------- test doubles
@@ -15,21 +15,26 @@ interface CustomHandle {
 
 interface Harness {
   commands: Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>;
+  events: Map<string, (event: unknown, ctx: unknown) => Promise<void>>;
   fetchCalls: Array<{ url: string; headers: Record<string, string> }>;
 }
 
 function setupExtension(): Harness {
   const commands = new Map();
+  const events = new Map();
   const fetchCalls: Array<{ url: string; headers: Record<string, string> }> = [];
 
   const pi = {
     registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
       commands.set(name, options);
     },
+    on(name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) {
+      events.set(name, handler);
+    },
   };
   factory(pi as never);
 
-  return { commands, fetchCalls };
+  return { commands, events, fetchCalls };
 }
 
 const IDENTITY_THEME = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
@@ -39,12 +44,15 @@ function makeCtx(options: {
   configured?: Record<string, boolean>;
   authByKey?: Record<string, string | undefined>;
   oauthByKey?: Record<string, boolean>;
+  providerBaseUrl?: Record<string, string>;
+  activeProvider?: string;
   fetchRoutes?: Record<string, () => Response | Promise<Response>>;
 }) {
   const configured = options.configured ?? {};
   const authByKey = options.authByKey ?? {};
   const oauthByKey = options.oauthByKey ?? {};
   const routes = options.fetchRoutes ?? {};
+  const statusCalls: Array<{ key: string; text: string | undefined }> = [];
 
   let customHandlesCurrent: CustomHandle[] = [];
   const notifications: Array<{ message: string; level: string }> = [];
@@ -62,17 +70,23 @@ function makeCtx(options: {
 
   const ctx = {
     mode: options.mode,
+    model: options.activeProvider !== undefined ? { provider: options.activeProvider, id: "test-model" } : undefined,
     modelRegistry: {
       getProviderAuthStatus: (id: string) => ({ configured: configured[id] ?? false }),
       getProviderAuth: async (id: string) =>
         authByKey[id] ? { auth: { apiKey: authByKey[id] }, source: oauthByKey[id] ? "OAuth" : "stored" } : undefined,
-      getProvider: () => ({}),
+      getProvider: (id: string) => (options.providerBaseUrl?.[id] ? { baseUrl: options.providerBaseUrl[id] } : {}),
     },
-    ui: { custom, notify: (message: string, level: string) => notifications.push({ message, level }) },
+    ui: {
+      custom,
+      notify: (message: string, level: string) => notifications.push({ message, level }),
+      setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+    },
   };
   // Expose handles for assertions.
   (ctx as { handles?: CustomHandle[] }).handles = customHandlesCurrent;
-  return { ctx, handles: customHandlesCurrent, notifications };
+  (ctx as { statusCalls?: typeof statusCalls }).statusCalls = statusCalls;
+  return { ctx, handles: customHandlesCurrent, notifications, statusCalls };
 }
 
 function installFetch(routes: Record<string, (url: string) => Response | Promise<Response>>, log: Array<{ url: string; headers: Record<string, string> }>) {
@@ -637,4 +651,126 @@ test("view: viewport height follows the terminal, not a fixed row count", () => 
   small.handleInput("\x1b[F"); // end
   const last = small.render(80).join("\n");
   assert.ok(last.includes("w29"), "end key reaches the final window");
+});
+
+// ------------------------------------------------------------- footer/lifecycle
+
+test("footer: formatFooterText shows remaining, reset, age, and stale markers", () => {
+  const now = 1_700_000_000_000;
+  const base = {
+    providerId: "x", providerName: "OpenCode Go", domainLabel: "d",
+    windows: [{ label: "rolling", usedPercent: 12.5, resetsAt: now + 3_600_000 }],
+  };
+  assert.equal(formatFooterText({ ...base, capturedAt: now }, { now }), "OpenCode Go 87.5% left · resets 1h 0m");
+  assert.equal(
+    formatFooterText({ ...base, capturedAt: now - 120_000 }, { now, stale: true }),
+    "OpenCode Go 87.5% left · resets 1h 0m · 2m old · stale",
+  );
+  assert.equal(
+    formatFooterText({
+      providerId: "or", providerName: "OpenRouter", domainLabel: "d", capturedAt: now,
+      windows: [{ label: "key", remaining: { value: 7.66, unit: "USD" }, limit: { value: 20, unit: "USD" } }],
+    }, { now }),
+    "OpenRouter $7.66 left",
+  );
+  assert.equal(
+    formatFooterText({
+      providerId: "or", providerName: "OpenRouter", domainLabel: "d", capturedAt: now,
+      windows: [{ label: "key", resetCadence: "monthly" }],
+    }, { now }),
+    undefined,
+    "no allowance information means no footer",
+  );
+  assert.equal(
+    formatFooterText({
+      providerId: "x", providerName: "Grok", domainLabel: "d", capturedAt: now,
+      windows: [{ label: "w", usedPercent: 100, resetsAt: now - 1 }],
+    }, { now }),
+    "Grok 0% left · reset passed",
+  );
+  // Status text shares the footer row; Pi truncates overflow itself. Our duty
+  // is compactness: the fullest form stays well under a 60-column budget.
+  const fullest = formatFooterText({ ...base, capturedAt: now - 300_000 }, { now, stale: true })!;
+  assert.ok(fullest.length <= 60, `footer must stay readable at narrow widths: ${fullest}`);
+});
+
+test("footer: formatFooterError names the kind and retry window", () => {
+  assert.equal(formatFooterError("Grok", "request", 90_000), "Grok request error · retry 1m");
+  assert.equal(formatFooterError("Grok", "auth", undefined), "Grok auth error");
+});
+
+test("extension: session_start refreshes the active provider and sets an additive footer", async () => {
+  const harness = setupExtension();
+  installFetch({ "opencode.ai": () => new Response(GO_BODY, { status: 200 }) }, harness.fetchCalls);
+  const { ctx, statusCalls } = makeCtx({
+    mode: "tui",
+    configured: { "opencode-go": true },
+    authByKey: { "opencode-go": "k" },
+    activeProvider: "opencode-go",
+  });
+
+  await harness.events.get("session_start")!({}, ctx);
+  await settle();
+  assert.equal(harness.fetchCalls.length, 1, "only the active provider refreshed");
+  const footer = statusCalls.find((c) => c.text !== undefined);
+  assert.ok(footer && /OpenCode Go 87\.5% left/.test(footer.text!), footer?.text ?? "no footer");
+  for (const call of statusCalls) assert.equal(call.key, "usage", "additive status key only");
+
+  await harness.events.get("session_shutdown")!({ reason: "quit" }, ctx);
+  assert.deepEqual(statusCalls[statusCalls.length - 1], { key: "usage", text: undefined });
+});
+
+test("extension: model_select switches the footer to the new active provider", async () => {
+  const harness = setupExtension();
+  installFetch(SIX_PROVIDER_BODIES, harness.fetchCalls);
+  const { ctx, statusCalls } = makeCtx({
+    mode: "tui",
+    configured: { "opencode-go": true, xai: true },
+    authByKey: { "opencode-go": "k", xai: "tok" },
+    oauthByKey: { xai: true },
+    activeProvider: "opencode-go",
+  });
+
+  await harness.events.get("session_start")!({}, ctx);
+  await settle();
+  await harness.events.get("model_select")!({ model: { provider: "xai" } }, ctx);
+  await settle();
+  const footer = statusCalls.find((c) => c.text?.includes("Grok"));
+  assert.ok(footer, statusCalls.map((c) => c.text).join(" | "));
+  assert.match(footer!.text!, /Grok 66\.5% left/);
+
+  await harness.events.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("extension: non-tui session_start performs no networking and sets no status", async () => {
+  const harness = setupExtension();
+  installFetch({ "opencode.ai": () => new Response(GO_BODY, { status: 200 }) }, harness.fetchCalls);
+  const { ctx, statusCalls } = makeCtx({
+    mode: "rpc",
+    configured: { "opencode-go": true },
+    authByKey: { "opencode-go": "k" },
+    activeProvider: "opencode-go",
+  });
+  await harness.events.get("session_start")!({}, ctx);
+  await settle();
+  assert.equal(harness.fetchCalls.length, 0);
+  assert.equal(statusCalls.length, 0);
+});
+
+test("extension: agent_settled with fresh data does not re-fetch", async () => {
+  const harness = setupExtension();
+  installFetch({ "opencode.ai": () => new Response(GO_BODY, { status: 200 }) }, harness.fetchCalls);
+  const { ctx } = makeCtx({
+    mode: "tui",
+    configured: { "opencode-go": true },
+    authByKey: { "opencode-go": "k" },
+    activeProvider: "opencode-go",
+  });
+  await harness.events.get("session_start")!({}, ctx);
+  await settle();
+  assert.equal(harness.fetchCalls.length, 1);
+  await harness.events.get("agent_settled")!({}, ctx);
+  await settle();
+  assert.equal(harness.fetchCalls.length, 1, "fresh data is not re-fetched on settle");
+  await harness.events.get("session_shutdown")!({ reason: "quit" }, ctx);
 });

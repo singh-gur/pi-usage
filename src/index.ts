@@ -1,16 +1,15 @@
 /**
  * pi-usage extension entry point.
  *
- * Registers the /usage command: refreshes all configured supported providers
- * concurrently and shows a dismissible, scrollable view with independent
- * per-provider loading/results/errors. Read-only; no automatic polling in
- * this phase.
+ * Registers the /usage command (dismissible, scrollable view across all
+ * configured supported providers) and the automatic active-provider footer
+ * indicator. Background work starts from session lifecycle events only; it is
+ * TUI-only, offline-aware, and fully cleared on session shutdown.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AuthGateway } from "./auth.ts";
-import { resolveQuotaAuth } from "./auth.ts";
-import { DEFAULT_HTTP_LIMITS, bounded, createGetJson, isOffline } from "./http.ts";
-import { UsageError, type ProviderUsage, type QuotaAdapter } from "./types.ts";
+import { UsageMonitor, type MonitorSession } from "./refresh.ts";
+import type { QuotaAdapter } from "./types.ts";
 import { UsageView, type UsageEntry } from "./ui.ts";
 import { opencodeGoAdapter } from "./providers/opencode-go.ts";
 import { openrouterAdapter } from "./providers/openrouter.ts";
@@ -29,76 +28,61 @@ const ADAPTERS: readonly QuotaAdapter[] = [
   grokAdapter,
 ];
 
-/** Whole-provider bound, including waiting for auth resolution. */
-const PROVIDER_BOUND_MS = 30_000;
-
-function errorUsage(adapter: QuotaAdapter, error: UsageError, capturedAt: number): ProviderUsage {
+function sessionFrom(ctx: {
+  mode: string;
+  modelRegistry: {
+    getProviderAuthStatus(id: string): { configured: boolean };
+    getProviderAuth(id: string): Promise<unknown>;
+    getProvider(id: string): unknown;
+  };
+  ui: { setStatus(key: string, text: string | undefined): void };
+}): MonitorSession {
   return {
-    providerId: adapter.id,
-    providerName: adapter.name,
-    domainLabel: adapter.domainLabel,
-    capturedAt,
-    windows: [],
-    error: { kind: error.kind, message: error.message },
+    mode: ctx.mode,
+    gateway: {
+      isConfigured: (id) => ctx.modelRegistry.getProviderAuthStatus(id).configured,
+      resolveAuth: (id) => ctx.modelRegistry.getProviderAuth(id) as never,
+      providerInfo: (id) => (ctx.modelRegistry.getProvider(id) ?? undefined) as never,
+    } satisfies AuthGateway,
+    setStatus: (key, text) => ctx.ui.setStatus(key, text),
   };
 }
 
-async function refreshProvider(
-  adapter: QuotaAdapter,
-  gateway: AuthGateway,
-  signal: AbortSignal,
-): Promise<ProviderUsage> {
-  const startedAt = Date.now();
-  const work = (async () => {
-    const auth = await resolveQuotaAuth(gateway, adapter.id, adapter.officialOrigin, adapter.allowedProviderOrigin);
-    if (auth instanceof UsageError) return errorUsage(adapter, auth, startedAt);
-    return await adapter.fetchQuota(auth, createGetJson(DEFAULT_HTTP_LIMITS, signal));
-  })();
-  try {
-    return await bounded(work, PROVIDER_BOUND_MS);
-  } catch (error) {
-    const usageError =
-      error instanceof UsageError ? error : new UsageError("request", "Provider refresh failed");
-    return errorUsage(adapter, usageError, Date.now());
-  }
-}
-
 export default function (pi: ExtensionAPI) {
+  const monitor = new UsageMonitor({ adapters: ADAPTERS });
+
   pi.registerCommand("usage", {
     description: "Show provider quota and allowance usage",
     handler: async (_args, ctx) => {
-      // Custom TUI view only; print/JSON/RPC modes stay silent (phase 4 formalizes).
+      // Custom TUI view only; print/JSON/RPC modes stay silent.
       if (ctx.mode !== "tui") return;
 
-      const gateway: AuthGateway = {
-        isConfigured: (id) => ctx.modelRegistry.getProviderAuthStatus(id).configured,
-        resolveAuth: (id) => ctx.modelRegistry.getProviderAuth(id),
-        providerInfo: (id) => ctx.modelRegistry.getProvider(id) ?? undefined,
-      };
+      const session = sessionFrom(ctx);
+      // Bind on demand if lifecycle events were missed; otherwise keep refs fresh.
+      if (!monitor.hasSession) monitor.startSession(session, ctx.model?.provider);
+      else monitor.updateSession(session);
 
-      // Only providers with credentials configured in Pi are shown and queried.
-      // The not-configured error kind stays as a safety net for resolution races.
-      const adapters = ADAPTERS.filter((adapter) => gateway.isConfigured(adapter.id));
+      const adapters = ADAPTERS.filter((adapter) => session.gateway.isConfigured(adapter.id));
       if (adapters.length === 0) {
         ctx.ui.notify("No supported providers are configured in Pi", "info");
         return;
       }
 
-      const controller = new AbortController();
+      // Prefill with cached data (verified against current credentials);
+      // the refresh below bypasses cache age but respects backoff.
       const entries: UsageEntry[] = adapters.map((adapter) => ({ name: adapter.name }));
+      await Promise.all(
+        adapters.map(async (adapter, index) => {
+          const cached = await monitor.serveCached(adapter.id);
+          if (cached !== undefined) entries[index] = { name: adapter.name, usage: cached };
+        }),
+      );
       let requestRender: (() => void) | undefined = () => {};
       const onUpdate = () => requestRender?.();
 
       void Promise.all(
         adapters.map(async (adapter, index) => {
-          const usage = isOffline()
-            ? errorUsage(
-                adapter,
-                new UsageError("canceled", "Quota networking suppressed (PI_OFFLINE)"),
-                Date.now(),
-              )
-            : await refreshProvider(adapter, gateway, controller.signal);
-          entries[index]!.usage = usage;
+          entries[index]!.usage = await monitor.refreshProvider(adapter);
           onUpdate();
         }),
       );
@@ -108,7 +92,7 @@ export default function (pi: ExtensionAPI) {
           theme,
           getEntries: () => entries,
           onClose: () => {
-            controller.abort();
+            // Shared refreshes also serve the footer; do not abort them here.
             done(undefined);
           },
           requestRender: () => tui.requestRender(),
@@ -117,8 +101,26 @@ export default function (pi: ExtensionAPI) {
         requestRender = () => tui.requestRender();
         return view;
       });
-      // View closed: discard late package-owned work.
-      controller.abort();
     },
+  });
+
+  // Background behavior is session-scoped: started on session_start, cleared
+  // on session_shutdown (quit/reload/new/resume/fork all fire shutdown first).
+  pi.on("session_start", async (_event, ctx) => {
+    monitor.startSession(sessionFrom(ctx as never), (ctx as { model?: { provider?: string } }).model?.provider);
+  });
+
+  pi.on("model_select", async (event, ctx) => {
+    monitor.updateSession(sessionFrom(ctx as never));
+    monitor.setActiveProvider(event.model.provider);
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    monitor.updateSession(sessionFrom(ctx as never));
+    monitor.onAgentSettled();
+  });
+
+  pi.on("session_shutdown", async () => {
+    monitor.shutdown();
   });
 }

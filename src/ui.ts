@@ -163,6 +163,44 @@ export function renderUsageLines(entries: UsageEntry[], theme: ThemeLike, width 
   return lines;
 }
 
+/**
+ * Compact footer text for the active provider. Uses the provider's first
+ * window (adapters order primary/shared-first, so Codex shows shared quota
+ * and never guesses a model-specific group). Undefined when the primary
+ * window carries no allowance information.
+ */
+export function formatFooterText(
+  usage: ProviderUsage,
+  options: { now?: number; stale?: boolean } = {},
+): string | undefined {
+  const now = options.now ?? Date.now();
+  const window = usage.windows[0];
+  if (!window) return undefined;
+  const parts: string[] = [];
+  if (window.remaining) {
+    parts.push(`${formatQuotaValue(window.remaining.value, window.remaining.unit)} left`);
+  } else {
+    const consumed = usedPercent(window);
+    if (consumed === undefined) return undefined;
+    parts.push(`${formatPercent(100 - consumed)} left`);
+  }
+  if (window.resetsAt !== undefined) {
+    parts.push(window.resetsAt > now ? `resets ${formatDuration(window.resetsAt - now)}` : "reset passed");
+  } else if (window.resetCadence) {
+    parts.push(`resets ${window.resetCadence}`);
+  }
+  const age = now - usage.capturedAt;
+  if (age >= 60_000) parts.push(`${formatDuration(age)} old`);
+  if (options.stale) parts.push("stale");
+  return `${usage.providerName} ${parts.join(" · ")}`;
+}
+
+/** Footer text for a provider with no usable data and a failed latest refresh. */
+export function formatFooterError(providerName: string, kind: string, retryInMs: number | undefined): string {
+  const retry = retryInMs !== undefined && retryInMs > 0 ? ` · retry ${formatDuration(retryInMs)}` : "";
+  return `${providerName} ${kind} error${retry}`;
+}
+
 function tabLine(entries: UsageEntry[], selected: number, theme: ThemeLike, width: number): string {
   const tabs = entries.map((entry, index) =>
     index === selected

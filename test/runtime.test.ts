@@ -294,3 +294,364 @@ test("parseResetTime handles epoch ms, epoch s, ISO strings, and rejects junk", 
   assert.equal(parseResetTime(0), undefined);
   assert.equal(parseResetTime(Number.NaN), undefined);
 });
+
+// ------------------------------------------------- monitor (cache/scheduler)
+
+import { mock } from "node:test";
+import {
+  EVENT_MIN_AGE_MS,
+  POLL_INTERVAL_MS,
+  STATUS_KEY,
+  UsageMonitor,
+  type MonitorSession,
+} from "../src/refresh.ts";
+import type { GetJson } from "../src/http.ts";
+import type { QuotaAdapter, QuotaWindow } from "../src/types.ts";
+
+type GateResult = { status: number; data: unknown; retryAfterMs?: number };
+
+function monitorAdapter(id: string, makeWindows: (now: number) => QuotaWindow[]): QuotaAdapter {
+  return {
+    id,
+    name: id === "opencode-go" ? "OpenCode Go" : id,
+    officialOrigin: `https://${id}.example`,
+    domainLabel: "test quota",
+    async fetchQuota(_auth, getJson) {
+      const response = await getJson(`https://${id}.example/usage`, {});
+      if (response.status !== 200) throw new UsageError("request", `HTTP ${response.status}`);
+      return {
+        providerId: id,
+        providerName: id === "opencode-go" ? "OpenCode Go" : id,
+        domainLabel: "test quota",
+        capturedAt: Date.now(),
+        windows: makeWindows(Date.now()),
+      };
+    },
+  };
+}
+
+interface MonitorEnv {
+  monitor: UsageMonitor;
+  session: MonitorSession;
+  statusCalls: Array<{ key: string; text: string | undefined }>;
+  calls: string[];
+  gate: { promise: Promise<GateResult>; resolve: (value: GateResult) => void };
+  adapters: QuotaAdapter[];
+  setKey(key: string): void;
+}
+
+function monitorEnv(options: {
+  responses?: Array<GateResult>;
+  gated?: boolean;
+  configured?: string[];
+  makeWindows?: (now: number) => QuotaWindow[];
+} = {}): MonitorEnv {
+  const responses = options.responses ?? [{ status: 200, data: {} }];
+  const configured = new Set(options.configured ?? ["opencode-go", "openrouter"]);
+  let apiKey = "key-1";
+  const calls: string[] = [];
+  const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+  const gate = Promise.withResolvers<GateResult>();
+  let index = 0;
+  const getJson: GetJson = async (url) => {
+    calls.push(url);
+    if (options.gated) return gate.promise;
+    const response = responses[Math.min(index, responses.length - 1)]!;
+    index++;
+    return response;
+  };
+  const adapters = [
+    monitorAdapter("opencode-go", options.makeWindows ?? ((now) => [{ label: "rolling", usedPercent: 12.5, resetsAt: now + 3_600_000 }])),
+    monitorAdapter("openrouter", options.makeWindows ?? ((now) => [{ label: "key", usedPercent: 40 }])),
+  ];
+  const session: MonitorSession = {
+    gateway: {
+      isConfigured: (id) => configured.has(id),
+      resolveAuth: async () => ({ auth: { apiKey } }),
+      providerInfo: () => undefined,
+    },
+    mode: "tui",
+    setStatus: (key, text) => statusCalls.push({ key, text }),
+  };
+  const monitor = new UsageMonitor({ adapters, createRequester: () => getJson });
+  return {
+    monitor,
+    session,
+    statusCalls,
+    calls,
+    gate,
+    adapters,
+    setKey: (key) => (apiKey = key),
+  };
+}
+
+/** Drain microtask chains without real timers (mock-timer safe). */
+const drain = async (turns = 30): Promise<void> => {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+};
+
+const lastStatus = (env: MonitorEnv) => env.statusCalls[env.statusCalls.length - 1];
+
+test("monitor: session start refreshes only the active provider and sets the footer", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.equal(env.calls.length, 1);
+    assert.ok(env.calls[0]!.includes("opencode-go.example"));
+    const footer = lastStatus(env);
+    assert.equal(footer!.key, STATUS_KEY);
+    assert.ok(/OpenCode Go 87\.5% left/.test(footer!.text!), footer!.text ?? "");
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: five-minute poll refreshes only the active provider", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    mock.timers.tick(POLL_INTERVAL_MS);
+    await drain();
+    mock.timers.tick(POLL_INTERVAL_MS);
+    await drain();
+    assert.equal(env.calls.filter((c) => c.includes("opencode-go")).length, 3, "initial + two polls");
+    assert.equal(env.calls.filter((c) => c.includes("openrouter")).length, 0, "inactive provider never polled");
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: agent_settled skips fresh data and refreshes once it is 60s old", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    env.monitor.onAgentSettled();
+    await drain();
+    assert.equal(env.calls.length, 1, "fresh data is not re-fetched");
+    mock.timers.tick(EVENT_MIN_AGE_MS + 1_000);
+    env.monitor.onAgentSettled();
+    await drain();
+    assert.equal(env.calls.length, 2);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: a passed reset time forces a refresh despite fresh data", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({ makeWindows: (now) => [{ label: "rolling", usedPercent: 10, resetsAt: now + 1_000 }] });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    mock.timers.tick(2_000); // reset time passes; data age only 2s
+    env.monitor.onAgentSettled();
+    await drain();
+    assert.equal(env.calls.length, 2, "passed reset needs fresh data, not assumed replenishment");
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: overlapping command/timer/event requests share one in-flight refresh", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({ gated: true });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    const command = env.monitor.refreshProvider(env.adapters[0]!);
+    const event = env.monitor.refreshProvider(env.adapters[0]!);
+    await drain();
+    assert.equal(env.calls.length, 1, "deduplicated");
+    env.gate.resolve({ status: 200, data: {} });
+    await Promise.all([command, event]);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: failures back off exponentially and manual queries respect backoff", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({ responses: [{ status: 500, data: {} }] });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.equal(env.calls.length, 1);
+    assert.match(lastStatus(env)!.text!, /request error · retry 30s/);
+
+    env.monitor.onAgentSettled(); // inside 30s backoff
+    await drain();
+    assert.equal(env.calls.length, 1, "no request while backing off");
+
+    const manual = await env.monitor.refreshProvider(env.adapters[0]!);
+    assert.equal(env.calls.length, 1, "manual query also respects backoff");
+    assert.equal(manual.error?.kind, "canceled");
+
+    mock.timers.tick(POLL_INTERVAL_MS); // t=300s: backoff (30s) long expired
+    await drain();
+    assert.equal(env.calls.length, 2, "poll retries after backoff");
+    assert.match(lastStatus(env)!.text!, /request error · retry 1m/, "second failure doubles backoff");
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: valid server Retry-After guidance is the backoff floor", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({ responses: [{ status: 429, data: {}, retryAfterMs: 60_000 }] });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    mock.timers.tick(31_000); // past the default 30s exponential floor
+    env.monitor.onAgentSettled();
+    await drain();
+    assert.equal(env.calls.length, 1, "server-imposed 60s backoff is honored");
+    mock.timers.tick(30_000); // t=61s: server guidance expired
+    env.monitor.onAgentSettled();
+    await drain();
+    assert.equal(env.calls.length, 2);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: cache is partitioned by credential; account change never serves stale-account data", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.ok(await env.monitor.serveCached("opencode-go"));
+
+    env.setKey("key-2"); // account switch: same provider, different credentials
+    assert.equal(await env.monitor.serveCached("opencode-go"), undefined, "other account's result is not served");
+
+    mock.timers.tick(EVENT_MIN_AGE_MS + 1_000);
+    env.monitor.onAgentSettled();
+    await drain();
+    assert.equal(env.calls.length, 2, "new account refreshes");
+    assert.ok(await env.monitor.serveCached("opencode-go"));
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: obsolete results are discarded after shutdown", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({ gated: true });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    env.monitor.shutdown();
+    assert.deepEqual(lastStatus(env), { key: STATUS_KEY, text: undefined }, "status removed on shutdown");
+
+    env.gate.resolve({ status: 200, data: {} }); // late completion after shutdown
+    await drain();
+    assert.equal(await env.monitor.serveCached("opencode-go"), undefined, "late result never enters the cache");
+    const afterShutdown = env.statusCalls.length;
+    mock.timers.tick(POLL_INTERVAL_MS * 3);
+    await drain();
+    assert.equal(env.calls.length, 1, "no further networking after shutdown");
+    assert.equal(env.statusCalls.length, afterShutdown, "no status updates from disposed session");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: failed refresh keeps old data visible but marked stale", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({ responses: [{ status: 200, data: {} }, { status: 500, data: {} }] });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.match(lastStatus(env)!.text!, /87\.5% left/);
+
+    mock.timers.tick(EVENT_MIN_AGE_MS + 1_000);
+    env.monitor.onAgentSettled();
+    await drain();
+    const footer = lastStatus(env)!.text!;
+    assert.match(footer, /87\.5% left/, "old data stays visible");
+    assert.match(footer, /stale/, "but is explicitly marked stale");
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: model switch refreshes the new active provider only on provider change", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    env.monitor.setActiveProvider("openrouter");
+    await drain();
+    assert.equal(env.calls.filter((c) => c.includes("openrouter")).length, 1);
+    env.monitor.setActiveProvider("openrouter"); // same provider: no request storm
+    await drain();
+    assert.equal(env.calls.filter((c) => c.includes("openrouter")).length, 1);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: unsupported active provider clears the footer", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "zai"); // not among the env's adapters
+    await drain();
+    assert.deepEqual(lastStatus(env), { key: STATUS_KEY, text: undefined });
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: non-tui sessions do no networking and set no status", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv();
+    env.session.mode = "rpc";
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    mock.timers.tick(POLL_INTERVAL_MS * 2);
+    await drain();
+    assert.equal(env.calls.length, 0);
+    assert.equal(env.statusCalls.length, 0);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: PI_OFFLINE suppresses quota networking", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  process.env.PI_OFFLINE = "1";
+  try {
+    const env = monitorEnv();
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    const manual = await env.monitor.refreshProvider(env.adapters[0]!);
+    assert.equal(env.calls.length, 0);
+    assert.equal(manual.error?.kind, "canceled");
+    env.monitor.shutdown();
+  } finally {
+    delete process.env.PI_OFFLINE;
+    mock.timers.reset();
+  }
+});

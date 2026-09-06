@@ -12,6 +12,8 @@ export interface HttpResponse {
   status: number;
   /** Parsed JSON body, or null when the body is not valid JSON. */
   data: unknown;
+  /** Validated server retry guidance (Retry-After, epoch ms from now); absent when none. */
+  retryAfterMs?: number;
 }
 
 export type GetJson = (url: string, headers: Record<string, string>) => Promise<HttpResponse>;
@@ -63,6 +65,19 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<st
   return chunks.map((chunk) => new TextDecoder().decode(chunk)).join("");
 }
 
+/** Validated Retry-After guidance in ms (seconds form or HTTP-date), bounded to 1s..1h; junk stays undefined. */
+export function parseRetryAfter(raw: string | null, now: number = Date.now()): number | undefined {
+  if (raw === null) return undefined;
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const ms = Number(trimmed) * 1000;
+    return Number.isFinite(ms) ? Math.min(Math.max(ms, 1_000), 3_600_000) : undefined;
+  }
+  const date = Date.parse(trimmed);
+  if (Number.isFinite(date)) return Math.min(Math.max(date - now, 1_000), 3_600_000);
+  return undefined;
+}
+
 /**
  * Create a bounded GET-JSON function. `signal` aborts package-owned waits;
  * fetch itself is also aborted by the per-request timeout.
@@ -99,7 +114,8 @@ export function createGetJson(limits: HttpLimits = DEFAULT_HTTP_LIMITS, signal?:
       if (error instanceof UsageError) throw error;
       throw new UsageError("request", "Response was not valid JSON");
     }
-    return { status: response.status, data };
+    const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
+    return retryAfterMs === undefined ? { status: response.status, data } : { status: response.status, data, retryAfterMs };
   };
 }
 
