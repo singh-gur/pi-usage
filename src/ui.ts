@@ -163,12 +163,41 @@ export function renderUsageLines(entries: UsageEntry[], theme: ThemeLike, width 
   return lines;
 }
 
+/** Remaining-allowance value text for one window; undefined when it carries no allowance info.
+ *  A provider-REPORTED percent is the compact, comparable form; raw values
+ *  are only used when no percent was reported (e.g. OpenRouter dollars). */
+function remainingValue(window: QuotaWindow): string | undefined {
+  if (window.usedPercent !== undefined) return formatPercent(100 - window.usedPercent);
+  if (window.remaining) return formatQuotaValue(window.remaining.value, window.remaining.unit);
+  const consumed = usedPercent(window);
+  return consumed !== undefined ? formatPercent(100 - consumed) : undefined;
+}
+
 /**
- * Compact footer text for the active provider. Uses the provider's first
- * window (adapters order primary/shared-first, so Codex shows shared quota
- * and never guesses a model-specific group). Undefined when the primary
- * window carries no allowance information.
+ * Leading status light by headroom so approaching exhaustion is visible at a
+ * glance (emoji glyphs render natively in the footer; ANSI codes do not):
+ * 🟢 >40% left, 🟡 ≤40%, 🔴 ≤15%, ⚪ when no ratio is derivable.
  */
+function statusLight(window: QuotaWindow): string {
+  const consumed = usedPercent(window);
+  if (consumed === undefined) return "⚪";
+  const left = 100 - consumed;
+  return left <= 15 ? "🔴" : left <= 40 ? "🟡" : "🟢";
+}
+
+/**
+ * The provider's weekly window for the footer's compact second slot: the
+ * first non-primary window labelled weekly, or Codex's secondary (shared)
+ * window (its weekly quota). Non-primary windows only, so a provider whose
+ * primary already IS weekly (Kimi, Grok) shows it once.
+ */
+function weeklyFooterWindow(usage: ProviderUsage): QuotaWindow | undefined {
+  return usage.windows
+    .slice(1)
+    .find((window) => window.label.startsWith("weekly") || window.label.startsWith("secondary"));
+}
+
+/** Compact remaining form: primary window + terse weekly slot; ⏳ marks reset timing. */
 export function formatFooterText(
   usage: ProviderUsage,
   options: { now?: number; stale?: boolean } = {},
@@ -177,28 +206,29 @@ export function formatFooterText(
   const window = usage.windows[0];
   if (!window) return undefined;
   const parts: string[] = [];
-  if (window.remaining) {
-    parts.push(`${formatQuotaValue(window.remaining.value, window.remaining.unit)} left`);
-  } else {
-    const consumed = usedPercent(window);
-    if (consumed === undefined) return undefined;
-    parts.push(`${formatPercent(100 - consumed)} left`);
-  }
+  const value = remainingValue(window);
+  if (value === undefined) return undefined;
+  parts.push(`${value} left`);
   if (window.resetsAt !== undefined) {
-    parts.push(window.resetsAt > now ? `resets ${formatDuration(window.resetsAt - now)}` : "reset passed");
+    parts.push(window.resetsAt > now ? `⏳ ${formatDuration(window.resetsAt - now)}` : "⏳ passed");
   } else if (window.resetCadence) {
-    parts.push(`resets ${window.resetCadence}`);
+    parts.push(`⏳ ${window.resetCadence}`);
+  }
+  const weekly = weeklyFooterWindow(usage);
+  if (weekly !== undefined) {
+    const weeklyRemaining = remainingValue(weekly);
+    if (weeklyRemaining !== undefined) parts.push(`wk ${weeklyRemaining} left`);
   }
   const age = now - usage.capturedAt;
   if (age >= 60_000) parts.push(`${formatDuration(age)} old`);
   if (options.stale) parts.push("stale");
-  return `${usage.providerName} ${parts.join(" · ")}`;
+  return `${statusLight(window)} ${parts.join(" · ")}`;
 }
 
 /** Footer text for a provider with no usable data and a failed latest refresh. */
-export function formatFooterError(providerName: string, kind: string, retryInMs: number | undefined): string {
+export function formatFooterError(kind: string, retryInMs: number | undefined): string {
   const retry = retryInMs !== undefined && retryInMs > 0 ? ` · retry ${formatDuration(retryInMs)}` : "";
-  return `${providerName} ${kind} error${retry}`;
+  return `🔴 ${kind} error${retry}`;
 }
 
 function tabLine(entries: UsageEntry[], selected: number, theme: ThemeLike, width: number): string {

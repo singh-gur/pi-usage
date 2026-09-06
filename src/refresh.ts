@@ -368,7 +368,7 @@ export class UsageMonitor {
     if (error !== undefined) {
       const back = this.backoff.get(providerId);
       const retryIn = back !== undefined && back.until > this.now() ? back.until - this.now() : undefined;
-      session.setStatus(STATUS_KEY, formatFooterError(adapter.name, error.kind, retryIn));
+      session.setStatus(STATUS_KEY, formatFooterError(error.kind, retryIn));
       return;
     }
     // First refresh still in flight: no status yet.

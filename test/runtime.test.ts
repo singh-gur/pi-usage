@@ -402,7 +402,7 @@ test("monitor: session start refreshes only the active provider and sets the foo
     assert.ok(env.calls[0]!.includes("opencode-go.example"));
     const footer = lastStatus(env);
     assert.equal(footer!.key, STATUS_KEY);
-    assert.ok(/OpenCode Go 87\.5% left/.test(footer!.text!), footer!.text ?? "");
+    assert.ok(/87\.5%/.test(footer!.text!) && /left/.test(footer!.text!), footer!.text ?? "");
     env.monitor.shutdown();
   } finally {
     mock.timers.reset();
@@ -577,13 +577,13 @@ test("monitor: failed refresh keeps old data visible but marked stale", async ()
     const env = monitorEnv({ responses: [{ status: 200, data: {} }, { status: 500, data: {} }] });
     env.monitor.startSession(env.session, "opencode-go");
     await drain();
-    assert.match(lastStatus(env)!.text!, /87\.5% left/);
+    assert.ok(/87\.5%/.test(lastStatus(env)!.text!), "old data stays visible");
 
     mock.timers.tick(EVENT_MIN_AGE_MS + 1_000);
     env.monitor.onAgentSettled();
     await drain();
     const footer = lastStatus(env)!.text!;
-    assert.match(footer, /87\.5% left/, "old data stays visible");
+    assert.ok(/87\.5%/.test(footer) && /left/.test(footer), "old data stays visible");
     assert.match(footer, /stale/, "but is explicitly marked stale");
     env.monitor.shutdown();
   } finally {

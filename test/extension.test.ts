@@ -655,23 +655,26 @@ test("view: viewport height follows the terminal, not a fixed row count", () => 
 
 // ------------------------------------------------------------- footer/lifecycle
 
+/** Strip ANSI color codes for plain-text assertions. */
+const plain = (text: string | undefined) => (text ?? "").replace(/\u001b\[\d+m/g, "");
+
 test("footer: formatFooterText shows remaining, reset, age, and stale markers", () => {
   const now = 1_700_000_000_000;
   const base = {
     providerId: "x", providerName: "OpenCode Go", domainLabel: "d",
     windows: [{ label: "rolling", usedPercent: 12.5, resetsAt: now + 3_600_000 }],
   };
-  assert.equal(formatFooterText({ ...base, capturedAt: now }, { now }), "OpenCode Go 87.5% left · resets 1h 0m");
+  assert.equal(plain(formatFooterText({ ...base, capturedAt: now }, { now })), "🟢 87.5% left · ⏳ 1h 0m");
   assert.equal(
-    formatFooterText({ ...base, capturedAt: now - 120_000 }, { now, stale: true }),
-    "OpenCode Go 87.5% left · resets 1h 0m · 2m old · stale",
+    plain(formatFooterText({ ...base, capturedAt: now - 120_000 }, { now, stale: true })),
+    "🟢 87.5% left · ⏳ 1h 0m · 2m old · stale",
   );
   assert.equal(
-    formatFooterText({
+    plain(formatFooterText({
       providerId: "or", providerName: "OpenRouter", domainLabel: "d", capturedAt: now,
       windows: [{ label: "key", remaining: { value: 7.66, unit: "USD" }, limit: { value: 20, unit: "USD" } }],
-    }, { now }),
-    "OpenRouter $7.66 left",
+    }, { now })),
+    "🟡 $7.66 left",
   );
   assert.equal(
     formatFooterText({
@@ -682,21 +685,122 @@ test("footer: formatFooterText shows remaining, reset, age, and stale markers", 
     "no allowance information means no footer",
   );
   assert.equal(
-    formatFooterText({
+    plain(formatFooterText({
       providerId: "x", providerName: "Grok", domainLabel: "d", capturedAt: now,
       windows: [{ label: "w", usedPercent: 100, resetsAt: now - 1 }],
-    }, { now }),
-    "Grok 0% left · reset passed",
+    }, { now })),
+    "🔴 0% left · ⏳ passed",
+  );
+});
+
+test("footer layout 1: compact weekly slot appears when the provider reports one", () => {
+  const now = 1_700_000_000_000;
+  // OpenCode Go shape: rolling primary + weekly second.
+  assert.equal(
+    plain(formatFooterText({
+      providerId: "go", providerName: "OpenCode Go", domainLabel: "d", capturedAt: now,
+      windows: [
+        { label: "rolling", usedPercent: 12.5, resetsAt: now + 3_600_000 },
+        { label: "weekly", usedPercent: 3 },
+        { label: "monthly", usedPercent: 1 },
+      ],
+    }, { now })),
+    "🟢 87.5% left · ⏳ 1h 0m · wk 97% left",
+  );
+  // Codex shape: shared primary + secondary (its weekly quota).
+  assert.equal(
+    plain(formatFooterText({
+      providerId: "codex", providerName: "OpenAI Codex", domainLabel: "d", capturedAt: now,
+      windows: [
+        { label: "primary (shared) · 5h", usedPercent: 42, resetsAt: now + 3_600_000 },
+        { label: "secondary (shared) · 7d", usedPercent: 5 },
+      ],
+    }, { now })),
+    "🟢 58% left · ⏳ 1h 0m · wk 95% left",
+  );
+  // Z.AI real shape: reported percentage wins over raw-unit remaining values.
+  assert.equal(
+    plain(formatFooterText({
+      providerId: "zai", providerName: "Z.AI", domainLabel: "d", capturedAt: now,
+      windows: [
+        { label: "5-hour", usedPercent: 25, remaining: { value: 1500, unit: "credits" }, limit: { value: 2000, unit: "credits" }, resetsAt: now + 3_600_000 },
+        { label: "weekly", usedPercent: 60, remaining: { value: 4000, unit: "credits" }, limit: { value: 10_000, unit: "credits" } },
+      ],
+    }, { now })),
+    "🟢 75% left · ⏳ 1h 0m · wk 40% left",
+  );
+  // Z.AI shape with value-based weekly remaining.
+  assert.equal(
+    plain(formatFooterText({
+      providerId: "zai", providerName: "Z.AI", domainLabel: "d", capturedAt: now,
+      windows: [
+        { label: "5-hour", usedPercent: 25 },
+        { label: "weekly", remaining: { value: 4.5, unit: "USD" }, limit: { value: 10, unit: "USD" } },
+      ],
+    }, { now })),
+    "🟢 75% left · wk $4.50 left",
+  );
+  // Kimi/Grok: the primary already IS weekly — shown once, no duplicate slot.
+  assert.equal(
+    plain(formatFooterText({
+      providerId: "kimi", providerName: "Kimi Coding", domainLabel: "d", capturedAt: now,
+      windows: [{ label: "weekly", usedPercent: 30 }, { label: "5h", usedPercent: 10 }],
+    }, { now })),
+    "🟢 70% left",
+  );
+  // A weekly window without usable numbers adds nothing.
+  assert.equal(
+    plain(formatFooterText({
+      providerId: "x", providerName: "X", domainLabel: "d", capturedAt: now,
+      windows: [{ label: "rolling", usedPercent: 10 }, { label: "weekly" }],
+    }, { now })),
+    "🟢 90% left",
   );
   // Status text shares the footer row; Pi truncates overflow itself. Our duty
-  // is compactness: the fullest form stays well under a 60-column budget.
-  const fullest = formatFooterText({ ...base, capturedAt: now - 300_000 }, { now, stale: true })!;
-  assert.ok(fullest.length <= 60, `footer must stay readable at narrow widths: ${fullest}`);
+  // is compactness: the fullest form (weekly slot + age + stale) stays within
+  // a 70-column budget.
+  const fullest = formatFooterText({
+    providerId: "go", providerName: "OpenCode Go", domainLabel: "d", capturedAt: now - 300_000,
+    windows: [
+      { label: "rolling", usedPercent: 12.5, resetsAt: now + 3_600_000 },
+      { label: "weekly", usedPercent: 3 },
+    ],
+  }, { now, stale: true })!;
+  assert.ok(plain(fullest).length <= 65, `footer must stay readable at narrow widths: ${fullest}`);
+});
+
+test("footer: leading status light reflects headroom tiers", () => {
+  const now = 1_700_000_000_000;
+  const footer = (usedPercent: number) =>
+    formatFooterText({
+      providerId: "x", providerName: "X", domainLabel: "d", capturedAt: now,
+      windows: [{ label: "w", usedPercent }],
+    }, { now })!;
+  assert.ok(footer(50)!.startsWith("🟢 "), "50% left is a green light");
+  assert.ok(footer(80)!.startsWith("🟡 "), "20% left is a yellow light");
+  assert.ok(footer(90)!.startsWith("🔴 "), "10% left is a red light");
+  assert.ok(footer(60)!.startsWith("🟡 "), "40% left is a yellow light");
+  assert.ok(footer(55)!.startsWith("🟢 "), "45% left is a green light");
+  assert.ok(footer(86)!.startsWith("🔴 "), "14% left is a red light");
+  assert.ok(footer(100)!.startsWith("🔴 "), "exhausted is a red light");
+  // Value-based remaining with a derivable ratio is tiered too.
+  const usd = formatFooterText({
+    providerId: "or", providerName: "OpenRouter", domainLabel: "d", capturedAt: now,
+    windows: [{ label: "key", remaining: { value: 3, unit: "USD" }, limit: { value: 20, unit: "USD" } }],
+  }, { now })!;
+  assert.ok(usd.startsWith("🔴 "), "15% left on a USD window is red at the new threshold");
+  // No derivable ratio: neutral white light, and no stray ANSI codes anywhere.
+  const neutral = formatFooterText({
+    providerId: "or", providerName: "OpenRouter", domainLabel: "d", capturedAt: now,
+    windows: [{ label: "key", remaining: { value: 7.66, unit: "USD" } }],
+  }, { now })!;
+  assert.equal(neutral, "⚪ $7.66 left");
+  assert.ok(!footer(50)!.includes("\u001b"), "no ANSI codes in footer text");
 });
 
 test("footer: formatFooterError names the kind and retry window", () => {
-  assert.equal(formatFooterError("Grok", "request", 90_000), "Grok request error · retry 1m");
-  assert.equal(formatFooterError("Grok", "auth", undefined), "Grok auth error");
+  assert.equal(formatFooterError("request", 90_000), "🔴 request error · retry 1m");
+  assert.equal(formatFooterError("auth", undefined), "🔴 auth error");
 });
 
 test("extension: session_start refreshes the active provider and sets an additive footer", async () => {
@@ -713,7 +817,7 @@ test("extension: session_start refreshes the active provider and sets an additiv
   await settle();
   assert.equal(harness.fetchCalls.length, 1, "only the active provider refreshed");
   const footer = statusCalls.find((c) => c.text !== undefined);
-  assert.ok(footer && /OpenCode Go 87\.5% left/.test(footer.text!), footer?.text ?? "no footer");
+  assert.ok(footer && /87\.5%/.test(footer.text!) && /left/.test(footer.text!), footer?.text ?? "no footer");
   for (const call of statusCalls) assert.equal(call.key, "usage", "additive status key only");
 
   await harness.events.get("session_shutdown")!({ reason: "quit" }, ctx);
@@ -735,9 +839,9 @@ test("extension: model_select switches the footer to the new active provider", a
   await settle();
   await harness.events.get("model_select")!({ model: { provider: "xai" } }, ctx);
   await settle();
-  const footer = statusCalls.find((c) => c.text?.includes("Grok"));
+  const footer = [...statusCalls].reverse().find((c) => c.text !== undefined);
   assert.ok(footer, statusCalls.map((c) => c.text).join(" | "));
-  assert.match(footer!.text!, /Grok 66\.5% left/);
+  assert.ok(/66\.5%/.test(footer!.text!) && /left/.test(footer!.text!), footer!.text ?? "");
 
   await harness.events.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
