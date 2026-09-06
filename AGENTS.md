@@ -70,6 +70,7 @@ Post-v1 standalone work:
 | Task | ID | Number |
 | --- | --- | --- |
 | Package settings mechanism | `kq5v82gmkqmr8nna88lj7odg` | #6 |
+| GitHub Copilot provider (`plans/github-copilot.md`) | `f8nff61ksk7p3621svfwz639` | #7 |
 
 Do not re-import or create duplicate phase tasks; always reuse these IDs.
 Add subtasks only when a step needs independent ownership, blocking, or
