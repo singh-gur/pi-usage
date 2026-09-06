@@ -467,7 +467,7 @@ Implementation complete (2026-09-05); awaiting user confirmation of Grok account
 ### Phase 4 — Automatic footer and lifecycle hardening
 
 - **Objective:** Deliver the approved automatic active-provider indicator and finish package usability/verification.
-- **Status:** In Progress (verification passed; awaiting user review)
+- **Status:** Complete (accepted 2026-09-06)
 - **Complexity:** Medium
 - **Estimated Time:** 60–90 minutes
 - **Prerequisites:** User-accepted phase 3 and six working command integrations.
@@ -512,7 +512,7 @@ Apply the shared rules. Capture known API/product limitations instead of marking
 - [x] `pnpm run pack:check` lists only intended distributable files.
 - [x] Active model switching, `/usage`, stale data, passed reset times, repeated reloads, and offline behavior work as specified. (Fake-clock/monitor tests: provider-change refresh, dedup, reset-expiry forcing refresh, stale-kept-visible; shutdown/late-discard covers reload replacement; offline suppression; `/usage` covered by command tests.)
 - [x] Normal editor/footer and other extension status entries remain intact. (Additive `setStatus("usage", …)` only; asserted that no other key is ever touched and `setFooter` is never used.)
-- [ ] User performs final local end-to-end and provider-dashboard comparisons without exposing credentials to the agent.
+- [x] User performs final local end-to-end and provider-dashboard comparisons without exposing credentials to the agent. (Live review via iterative footer-layout session: user ran the extension locally, confirmed session/model-switch behavior and settled the footer layout — status light tiers, weekly slot, hourglass reset marker, no provider name, reported-percent preference — before explicitly accepting phase 4. Grok paid-plan comparison remains deferred from phase 3.)
 
 #### Completion Gate
 
@@ -535,6 +535,8 @@ Implementation complete (2026-09-06); awaiting user end-to-end review. Decisions
 - `tsconfig.json` lib bumped ES2023 → ES2024 for `Promise.withResolvers` typing in tests; Node ≥24.16 supports it at runtime and no shipped behavior changes.
 - `package.json` needed no changes; the existing `files` allowlist already covers `src/refresh.ts`.
 - Tests run 125 → 131 with the monitor suite using `node:test` mock timers (`apis: ["setTimeout", "Date"]`) and a microtask drain helper; extension tests gained an `events` capture, `setStatus` recording, and `activeProvider` support in the fake context.
+- **Footer layout review (2026-09-06, user-directed iteration; final form):** `🟢 87.5% left · ⏳ 1h 0m · wk 97% left · [age] [stale]`. Decisions from the review session: no provider name (the active model identifies it); a leading headroom light (🟢 >40% left, 🟡 ≤40%, 🔴 ≤15%, ⚪ when no ratio is derivable; thresholds user-chosen); a compact `wk` second slot for providers reporting a weekly window (Codex: its secondary shared window; Kimi/Grok skip it since their primary already is weekly); emoji glyphs instead of ANSI codes because Pi's status bar does not render ANSI color (verified against Pi 0.85.1: `sanitizeStatusText` collapses whitespace but colorization is unreliable in practice for the user's terminal); ⏳ for reset timing; provider-REPORTED percentages preferred over raw-unit remaining (Z.ai shows percent; OpenRouter dollars and Kimi uses stay value-based). Error footer: `🔴 <kind> error · retry <window>`. Shipped in commit 24abaf1.
+- Phase 4 accepted by the user on 2026-09-06 after the live layout review. Checkpoint commit + tag `pi-usage-phase-4` authorized and completed.
 
 ## Phase Dependencies
 
