@@ -19,17 +19,27 @@ Providers without credentials configured in Pi are omitted entirely. One account
 
 Requires Node.js ≥ 24.16 and Pi ≥ 0.85.1.
 
+The package is distributed from this Git repository (no npm package). Move a pinned install to a newer ref with `pi install git:github.com/singh-gur/pi-usage@<ref>`; unpinned installs are reconciled by `pi update --extensions`.
+
+Install as a Pi package (latest commit):
+
+```
+pi install git:github.com/singh-gur/pi-usage
+```
+
+Or pin to a known release (tags `pi-usage-phase-1` … `pi-usage-phase-4` are published checkpoints):
+
+```
+pi install git:github.com/singh-gur/pi-usage@pi-usage-phase-4
+```
+
+The `https://` protocol URL form works too: `pi install https://github.com/singh-gur/pi-usage`. Review the source before installing — Pi packages run with full system access.
+
 From a Git checkout (local development):
 
 ```
 git clone git@github.com:singh-gur/pi-usage.git
 pi -e ./pi-usage/src/index.ts
-```
-
-As a Pi package (installs from the Git repository):
-
-```
-pi install github.com/singh-gur/pi-usage
 ```
 
 Credentials are resolved exclusively through Pi (`/login <provider>`); the extension never reads credential stores, `.env` files, or browsers. Codex and Grok quota requires OAuth (subscription) credentials — plain API keys are rejected before any request.
