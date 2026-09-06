@@ -185,19 +185,7 @@ function statusLight(window: QuotaWindow): string {
   return left <= 15 ? "🔴" : left <= 40 ? "🟡" : "🟢";
 }
 
-/**
- * The provider's weekly window for the footer's compact second slot: the
- * first non-primary window labelled weekly, or Codex's secondary (shared)
- * window (its weekly quota). Non-primary windows only, so a provider whose
- * primary already IS weekly (Kimi, Grok) shows it once.
- */
-function weeklyFooterWindow(usage: ProviderUsage): QuotaWindow | undefined {
-  return usage.windows
-    .slice(1)
-    .find((window) => window.label.startsWith("weekly") || window.label.startsWith("secondary"));
-}
-
-/** Compact remaining form: primary window + terse weekly slot; ⏳ marks reset timing. */
+/** Compact remaining form for the primary window; ⏳ marks reset timing. */
 export function formatFooterText(
   usage: ProviderUsage,
   options: { now?: number; stale?: boolean } = {},
@@ -213,11 +201,6 @@ export function formatFooterText(
     parts.push(window.resetsAt > now ? `⏳ ${formatDuration(window.resetsAt - now)}` : "⏳ passed");
   } else if (window.resetCadence) {
     parts.push(`⏳ ${window.resetCadence}`);
-  }
-  const weekly = weeklyFooterWindow(usage);
-  if (weekly !== undefined) {
-    const weeklyRemaining = remainingValue(weekly);
-    if (weeklyRemaining !== undefined) parts.push(`wk ${weeklyRemaining} left`);
   }
   const age = now - usage.capturedAt;
   if (age >= 60_000) parts.push(`${formatDuration(age)} old`);

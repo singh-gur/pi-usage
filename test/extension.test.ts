@@ -693,80 +693,18 @@ test("footer: formatFooterText shows remaining, reset, age, and stale markers", 
   );
 });
 
-test("footer layout 1: compact weekly slot appears when the provider reports one", () => {
+test("footer: secondary weekly limits are omitted", () => {
   const now = 1_700_000_000_000;
-  // OpenCode Go shape: rolling primary + weekly second.
   assert.equal(
     plain(formatFooterText({
       providerId: "go", providerName: "OpenCode Go", domainLabel: "d", capturedAt: now,
       windows: [
         { label: "rolling", usedPercent: 12.5, resetsAt: now + 3_600_000 },
         { label: "weekly", usedPercent: 3 },
-        { label: "monthly", usedPercent: 1 },
       ],
     }, { now })),
-    "🟢 87.5% left · ⏳ 1h 0m · wk 97% left",
+    "🟢 87.5% left · ⏳ 1h 0m",
   );
-  // Codex shape: shared primary + secondary (its weekly quota).
-  assert.equal(
-    plain(formatFooterText({
-      providerId: "codex", providerName: "OpenAI Codex", domainLabel: "d", capturedAt: now,
-      windows: [
-        { label: "primary (shared) · 5h", usedPercent: 42, resetsAt: now + 3_600_000 },
-        { label: "secondary (shared) · 7d", usedPercent: 5 },
-      ],
-    }, { now })),
-    "🟢 58% left · ⏳ 1h 0m · wk 95% left",
-  );
-  // Z.AI real shape: reported percentage wins over raw-unit remaining values.
-  assert.equal(
-    plain(formatFooterText({
-      providerId: "zai", providerName: "Z.AI", domainLabel: "d", capturedAt: now,
-      windows: [
-        { label: "5-hour", usedPercent: 25, remaining: { value: 1500, unit: "credits" }, limit: { value: 2000, unit: "credits" }, resetsAt: now + 3_600_000 },
-        { label: "weekly", usedPercent: 60, remaining: { value: 4000, unit: "credits" }, limit: { value: 10_000, unit: "credits" } },
-      ],
-    }, { now })),
-    "🟢 75% left · ⏳ 1h 0m · wk 40% left",
-  );
-  // Z.AI shape with value-based weekly remaining.
-  assert.equal(
-    plain(formatFooterText({
-      providerId: "zai", providerName: "Z.AI", domainLabel: "d", capturedAt: now,
-      windows: [
-        { label: "5-hour", usedPercent: 25 },
-        { label: "weekly", remaining: { value: 4.5, unit: "USD" }, limit: { value: 10, unit: "USD" } },
-      ],
-    }, { now })),
-    "🟢 75% left · wk $4.50 left",
-  );
-  // Kimi/Grok: the primary already IS weekly — shown once, no duplicate slot.
-  assert.equal(
-    plain(formatFooterText({
-      providerId: "kimi", providerName: "Kimi Coding", domainLabel: "d", capturedAt: now,
-      windows: [{ label: "weekly", usedPercent: 30 }, { label: "5h", usedPercent: 10 }],
-    }, { now })),
-    "🟢 70% left",
-  );
-  // A weekly window without usable numbers adds nothing.
-  assert.equal(
-    plain(formatFooterText({
-      providerId: "x", providerName: "X", domainLabel: "d", capturedAt: now,
-      windows: [{ label: "rolling", usedPercent: 10 }, { label: "weekly" }],
-    }, { now })),
-    "🟢 90% left",
-  );
-  // Status text shares the footer row; Pi truncates overflow itself. Our duty
-  // is compactness: the fullest form (weekly slot + age + stale) stays within
-  // a 70-column budget.
-  const fullest = formatFooterText({
-    providerId: "go", providerName: "OpenCode Go", domainLabel: "d", capturedAt: now - 300_000,
-    windows: [
-      { label: "rolling", usedPercent: 12.5, resetsAt: now + 3_600_000 },
-      { label: "weekly", usedPercent: 3 },
-    ],
-  }, { now, stale: true })!;
-  assert.ok(plain(fullest).length <= 65, `footer must stay readable at narrow widths: ${fullest}`);
 });
 
 test("footer: leading status light reflects headroom tiers", () => {
