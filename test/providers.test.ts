@@ -748,3 +748,193 @@ test("grok: null and non-object config responses are not usable windows", async 
   const { getJson } = grokGetJson({ user: GROK_USER, credits: null, monthly: null });
   await expectAsyncError("unsupported", () => grokAdapter.fetchQuota({ apiKey: "tok", oauth: true }, getJson));
 });
+
+// ---------------------------------------------------------- GitHub Copilot
+
+import { githubCopilotAdapter, interpretGitHubCopilot } from "../src/providers/github-copilot.ts";
+
+const COPILOT_UTC_RESET = "2026-10-01T08:00:00Z";
+
+function copilotPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    copilot_plan: "pro",
+    token_based_billing: true,
+    quota_reset_date_utc: COPILOT_UTC_RESET,
+    quota_snapshots: {
+      premium_interactions: { percent_remaining: 62.5, unlimited: false, has_quota: true },
+      completions: { percent_remaining: 10, unlimited: true },
+      chat: { percent_remaining: 5, unlimited: false },
+    },
+    organization_login_list: ["acme-org"],
+    analytics_tracking_id: "tid-123",
+    ...overrides,
+  };
+}
+
+test("copilot: AI-credit billing mode maps remaining percent to a single window", () => {
+  const result = interpretGitHubCopilot(200, copilotPayload(), NOW);
+  assert.equal(result.providerId, "github-copilot");
+  assert.equal(result.providerName, "GitHub Copilot");
+  assert.equal(result.domainLabel, "AI-credit allowance");
+  assert.deepEqual(result.windows, [
+    { label: "main allowance", usedPercent: 37.5, resetsAt: Date.parse(COPILOT_UTC_RESET) },
+  ]);
+});
+
+test("copilot: billing flag selects legacy or neutral domain labels", () => {
+  assert.equal(
+    interpretGitHubCopilot(200, copilotPayload({ token_based_billing: false }), NOW).domainLabel,
+    "Legacy premium-request allowance",
+  );
+  assert.equal(
+    interpretGitHubCopilot(200, copilotPayload({ token_based_billing: "yes" }), NOW).domainLabel,
+    "Copilot allowance",
+  );
+  assert.equal(interpretGitHubCopilot(200, copilotPayload({ token_based_billing: undefined }), NOW).domainLabel, "Copilot allowance");
+});
+
+test("copilot: explicit free plan meters the chat snapshot, not completions", () => {
+  const result = interpretGitHubCopilot(
+    200,
+    copilotPayload({
+      copilot_plan: "free",
+      quota_reset_date_utc: undefined,
+      quota_reset_date: "2026-10-01",
+      limited_user_reset_date: "2026-09-01",
+    }),
+    NOW,
+  );
+  assert.equal(result.windows[0]!.usedPercent, 95, "chat snapshot percent (5 remaining)");
+  assert.equal(result.windows[0]!.resetDate, "2026-10-01", "quota_reset_date wins over limited_user_reset_date");
+
+  const fallback = interpretGitHubCopilot(
+    200,
+    copilotPayload({ copilot_plan: "free", quota_reset_date_utc: undefined, quota_reset_date: "2026-13-01", limited_user_reset_date: "2026-09-01" }),
+    NOW,
+  );
+  assert.equal(fallback.windows[0]!.resetDate, "2026-09-01", "invalid quota_reset_date falls back to limited_user_reset_date");
+});
+
+test("copilot: zero and fractional remaining percentages are preserved", () => {
+  const zero = interpretGitHubCopilot(200, copilotPayload({ quota_snapshots: { premium_interactions: { percent_remaining: 0, unlimited: false } } }), NOW);
+  assert.equal(zero.windows[0]!.usedPercent, 100, "zero remaining is real exhaustion");
+  const fractional = interpretGitHubCopilot(200, copilotPayload({ quota_snapshots: { premium_interactions: { percent_remaining: 0.5, unlimited: false } } }), NOW);
+  assert.equal(fractional.windows[0]!.usedPercent, 99.5);
+});
+
+test("copilot: missing, malformed, or out-of-range percentages are unsupported", () => {
+  for (const percent_remaining of [undefined, "lots", 101, -1, null, Number.POSITIVE_INFINITY]) {
+    expectError(
+      "unsupported",
+      () => interpretGitHubCopilot(200, copilotPayload({ quota_snapshots: { premium_interactions: { percent_remaining, unlimited: false } } }), NOW),
+    );
+  }
+});
+
+test("copilot: unlimited personal plan reports unlimited, ignoring placeholder percent", () => {
+  const result = interpretGitHubCopilot(
+    200,
+    copilotPayload({ quota_snapshots: { premium_interactions: { percent_remaining: 100, unlimited: true } } }),
+    NOW,
+  );
+  assert.equal(result.windows[0]!.status, "unlimited");
+  assert.equal(result.windows[0]!.usedPercent, undefined, "placeholder percentage is not a balance");
+});
+
+test("copilot: unlimited organization and unknown plans report organization-managed", () => {
+  for (const copilot_plan of ["business", "enterprise", "mystery-plan", undefined]) {
+    const payload = copilotPayload({
+      ...(copilot_plan === undefined ? { copilot_plan: undefined } : { copilot_plan }),
+      quota_snapshots: { premium_interactions: { percent_remaining: 100, unlimited: true } },
+    });
+    const result = interpretGitHubCopilot(200, payload, NOW);
+    assert.equal(result.windows[0]!.status, "organization-managed", `plan ${String(copilot_plan)}`);
+  }
+});
+
+test("copilot: timestamped reset wins; invalid resets stay absent without losing usage", () => {
+  const timestamped = interpretGitHubCopilot(200, copilotPayload(), NOW);
+  assert.equal(timestamped.windows[0]!.resetsAt, Date.parse(COPILOT_UTC_RESET));
+
+  const dateOnly = interpretGitHubCopilot(
+    200,
+    copilotPayload({ quota_reset_date_utc: "not-a-date", quota_reset_date: "2026-10-01" }),
+    NOW,
+  );
+  assert.equal(dateOnly.windows[0]!.resetsAt, undefined);
+  assert.equal(dateOnly.windows[0]!.resetDate, "2026-10-01");
+  assert.equal(dateOnly.windows[0]!.usedPercent, 37.5, "valid usage survives invalid reset data");
+
+  const noReset = interpretGitHubCopilot(
+    200,
+    copilotPayload({ quota_reset_date_utc: undefined, quota_reset_date: "2026-02-31" }),
+    NOW,
+  );
+  assert.equal(noReset.windows[0]!.resetDate, undefined, "calendar-invalid dates are absent");
+  assert.equal(noReset.windows[0]!.resetsAt, undefined);
+  assert.equal(noReset.windows[0]!.usedPercent, 37.5);
+
+  const utcDateOnly = interpretGitHubCopilot(
+    200,
+    copilotPayload({ quota_reset_date_utc: "2026-10-01" }),
+    NOW,
+  );
+  assert.equal(utcDateOnly.windows[0]!.resetsAt, undefined, "date-only utc value manufactures no midnight countdown");
+  assert.equal(utcDateOnly.windows[0]!.resetDate, "2026-10-01");
+});
+
+test("copilot: status errors are fixed and sanitized", () => {
+  const rejected = expectError("auth", () => interpretGitHubCopilot(401, { message: "bad token" }, NOW));
+  assert.equal(rejected.message, "Credentials were rejected by GitHub Copilot");
+  const denied = expectError("auth", () => interpretGitHubCopilot(403, { message: "forbidden detail" }, NOW));
+  assert.equal(denied.message, "Access to GitHub Copilot usage was denied");
+  assert.ok(!denied.message.includes("expired") && !denied.message.includes("subscription"), "403 does not assert a cause");
+  const request = expectError("request", () => interpretGitHubCopilot(503, { oops: true }, NOW));
+  assert.equal(request.message, "Usage endpoint returned HTTP 503");
+});
+
+test("copilot: unusable 200 bodies are unsupported", () => {
+  expectError("unsupported", () => interpretGitHubCopilot(200, null, NOW));
+  expectError("unsupported", () => interpretGitHubCopilot(200, {}, NOW));
+  expectError("unsupported", () => interpretGitHubCopilot(200, { quota_snapshots: {} }, NOW));
+  expectError("unsupported", () => interpretGitHubCopilot(200, copilotPayload({ copilot_plan: "free", quota_snapshots: { premium_interactions: { percent_remaining: 50, unlimited: false } } }), NOW));
+});
+
+test("copilot: results never surface organization or tracking identifiers", () => {
+  const result = interpretGitHubCopilot(200, copilotPayload({ copilot_plan: "business", quota_snapshots: { premium_interactions: { percent_remaining: 40, unlimited: false } } }), NOW);
+  const serialized = JSON.stringify(result);
+  assert.ok(!serialized.includes("acme-org"));
+  assert.ok(!serialized.includes("tid-123"));
+});
+
+test("copilot: adapter sends bearer auth with source-derived client headers to the fixed endpoint", async () => {
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const getJson = async (url: string, headers: Record<string, string>) => {
+    calls.push({ url, headers });
+    return { status: 200, data: copilotPayload() };
+  };
+  await githubCopilotAdapter.fetchQuota({ apiKey: "ghu-session", oauth: true }, getJson);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "https://api.github.com/copilot_internal/user");
+  assert.deepEqual(calls[0]!.headers, {
+    accept: "application/json",
+    authorization: "Bearer ghu-session",
+    "user-agent": "GitHubCopilotChat/0.35.0",
+    "editor-version": "vscode/1.107.0",
+    "editor-plugin-version": "copilot-chat/0.35.0",
+    "copilot-integration-id": "vscode-chat",
+  });
+});
+
+test("copilot: non-OAuth resolution is rejected without a request", async () => {
+  let requests = 0;
+  const getJson = async () => {
+    requests++;
+    return { status: 200, data: copilotPayload() };
+  };
+  const error = await githubCopilotAdapter
+    .fetchQuota({ apiKey: "ghp-api-key", oauth: false }, getJson)
+    .catch((e) => e);
+  assert.ok(error instanceof UsageError && error.kind === "auth");
+  assert.equal(requests, 0);
+});

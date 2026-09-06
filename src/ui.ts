@@ -91,6 +91,8 @@ function detailParts(window: QuotaWindow, includesLimit: boolean): string[] {
         : "Reset time passed",
     );
   }
+  // Date-only resets render as calendar dates; no countdown is manufactured.
+  if (window.resetDate) parts.push(`Resets ${window.resetDate}`);
   if (window.resetCadence) parts.push(`Resets ${window.resetCadence}`);
   if (window.used) parts.push(`${formatQuotaValue(window.used.value, window.used.unit)} used`);
   if (!includesLimit && window.limit) parts.push(`cap ${formatQuotaValue(window.limit.value, window.limit.unit)}`);
@@ -103,12 +105,17 @@ function windowLines(window: QuotaWindow, theme: ThemeLike, width: number): stri
   const consumed = usedPercent(window);
   if (consumed === undefined) {
     const facts: string[] = [];
+    if (window.status === "unlimited") facts.push("Unlimited");
+    else if (window.status === "organization-managed") {
+      facts.push("Organization-managed; balance not reported");
+    }
     if (window.used) facts.push(`${formatQuotaValue(window.used.value, window.used.unit)} used`);
     if (window.remaining) facts.push(`${formatQuotaValue(window.remaining.value, window.remaining.unit)} remaining`);
     if (window.limit) facts.push(`cap ${formatQuotaValue(window.limit.value, window.limit.unit)}`);
     if (window.resetsAt !== undefined) {
       facts.push(window.resetsAt > Date.now() ? `Resets in ${formatDuration(window.resetsAt - Date.now())}` : "Reset time passed");
     }
+    if (window.resetDate) facts.push(`Resets ${window.resetDate}`);
     if (window.resetCadence) facts.push(`Resets ${window.resetCadence}`);
     if (facts.length > 0) lines.push(theme.fg("dim", `  ${facts.join(" · ")}`));
     return lines;
@@ -166,8 +173,11 @@ export function renderUsageLines(entries: UsageEntry[], theme: ThemeLike, width 
 
 /** Remaining-allowance value text for one window; undefined when it carries no allowance info.
  *  A provider-REPORTED percent is the compact, comparable form; raw values
- *  are only used when no percent was reported (e.g. OpenRouter dollars). */
+ *  are only used when no percent was reported (e.g. OpenRouter dollars).
+ *  Nonnumeric states render as neutral text, never a percentage placeholder. */
 function remainingValue(window: QuotaWindow): string | undefined {
+  if (window.status === "unlimited") return "Unlimited";
+  if (window.status === "organization-managed") return "org-managed";
   if (window.usedPercent !== undefined) return formatPercent(100 - window.usedPercent);
   if (window.remaining) return formatQuotaValue(window.remaining.value, window.remaining.unit);
   const consumed = usedPercent(window);
@@ -197,12 +207,15 @@ export function formatFooterText(
   const window = usage.windows[0];
   if (!window) return undefined;
   const parts: string[] = [];
+  const nonnumeric = window.status === "unlimited" || window.status === "organization-managed";
   const value = remainingValue(window);
   if (value === undefined) return undefined;
   if (format === "compact") return `${statusLight(window)} ${value}`;
-  parts.push(`${value} left`);
+  parts.push(nonnumeric ? value : `${value} left`);
   if (window.resetsAt !== undefined) {
     parts.push(window.resetsAt > now ? `⏳ ${formatDuration(window.resetsAt - now)}` : "⏳ passed");
+  } else if (window.resetDate) {
+    parts.push(`⏳ ${window.resetDate}`);
   } else if (window.resetCadence) {
     parts.push(`⏳ ${window.resetCadence}`);
   }

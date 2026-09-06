@@ -50,6 +50,7 @@ function makeCtx(options: {
   configured?: Record<string, boolean>;
   authByKey?: Record<string, string | undefined>;
   oauthByKey?: Record<string, boolean>;
+  authBaseUrl?: Record<string, string>;
   providerBaseUrl?: Record<string, string>;
   activeProvider?: string;
   fetchRoutes?: Record<string, () => Response | Promise<Response>>;
@@ -60,6 +61,7 @@ function makeCtx(options: {
   const configured = options.configured ?? {};
   const authByKey = options.authByKey ?? {};
   const oauthByKey = options.oauthByKey ?? {};
+  const authBaseUrl = options.authBaseUrl ?? {};
   const routes = options.fetchRoutes ?? {};
   const statusCalls: Array<{ key: string; text: string | undefined }> = [];
 
@@ -87,7 +89,12 @@ function makeCtx(options: {
     modelRegistry: {
       getProviderAuthStatus: (id: string) => ({ configured: configured[id] ?? false }),
       getProviderAuth: async (id: string) =>
-        authByKey[id] ? { auth: { apiKey: authByKey[id] }, source: oauthByKey[id] ? "OAuth" : "stored" } : undefined,
+        authByKey[id]
+          ? {
+              auth: { apiKey: authByKey[id], ...(authBaseUrl[id] !== undefined ? { baseUrl: authBaseUrl[id] } : {}) },
+              source: oauthByKey[id] ? "OAuth" : "stored",
+            }
+          : undefined,
       getProvider: (id: string) => (options.providerBaseUrl?.[id] ? { baseUrl: options.providerBaseUrl[id] } : {}),
     },
     ui: {
@@ -258,7 +265,7 @@ test("extension: unconfigured providers are omitted from the view entirely", asy
   await settle();
   const lines = handles[0]!.component.render(100).join("\n");
   assert.ok(/87\.5% left/.test(lines), "configured provider still fetched");
-  for (const absent of ["OpenRouter", "Kimi", "Codex", "Z.AI"]) {
+  for (const absent of ["OpenRouter", "Kimi", "Codex", "Z.AI", "Grok", "GitHub Copilot"]) {
     assert.ok(!lines.includes(absent), `${absent} must not appear`);
   }
   assert.equal(harness.fetchCalls.length, 1, "unconfigured providers trigger no request");
@@ -449,10 +456,44 @@ test("view: scroll clamps at both ends and follows input", () => {
   assert.ok(closed);
 });
 
+test("view: nonnumeric allowance states render as neutral text, not bars", () => {
+  const usage: ProviderUsage = {
+    providerId: "github-copilot",
+    providerName: "GitHub Copilot",
+    domainLabel: "AI-credit allowance",
+    capturedAt: Date.now(),
+    windows: [
+      { label: "main allowance", status: "unlimited" },
+      { label: "main allowance", status: "organization-managed", resetDate: "2026-10-01" },
+      { label: "main allowance", usedPercent: 37.5, resetDate: "2026-10-01" },
+    ],
+  };
+  const lines = renderUsageLines([{ name: "GitHub Copilot", usage }], IDENTITY_THEME, 40);
+  const text = lines.join("\n");
+  assert.ok(text.includes("Unlimited"));
+  assert.ok(text.includes("Organization-managed; balance not reported"));
+  assert.ok((text.match(/Resets 2026-10-01/g) ?? []).length === 2, "date-only resets render as calendar dates");
+  const unlimitedLine = lines.find((l) => l.includes("Unlimited"))!;
+  assert.ok(!unlimitedLine.includes("█"), "nonnumeric states draw no bar");
+  const orgLine = lines.find((l) => l.includes("Organization-managed"))!;
+  assert.ok(!orgLine.includes("█"), "organization-managed draws no bar");
+  assert.ok(!text.includes("100% left"), "no fabricated percentage placeholder");
+});
+
 test("view: every rendered line respects the width bound", () => {
+  const copilotUsage: ProviderUsage = {
+    providerId: "github-copilot",
+    providerName: "GitHub Copilot",
+    domainLabel: "Legacy premium-request allowance",
+    capturedAt: Date.now(),
+    windows: [
+      { label: "main allowance", status: "organization-managed", resetDate: "2026-10-01" },
+    ],
+  };
   const entries: UsageEntry[] = [
     { name: "OpenCode Go", usage: goUsage() },
     { name: "OpenRouter", usage: goUsage() },
+    { name: "GitHub Copilot", usage: copilotUsage },
   ];
   const view = new UsageView({ theme: IDENTITY_THEME, getEntries: () => entries, onClose: () => {}, requestRender: () => {}, maxRows: 12 });
   for (const width of [20, 40, 80]) {
@@ -468,7 +509,7 @@ const CODEX_JWT = `${Buffer.from(JSON.stringify({ alg: "RS256" })).toString("bas
   JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-9" } }),
 ).toString("base64url")}.sig`;
 
-const SIX_PROVIDER_BODIES = {
+const SEVEN_PROVIDER_BODIES = {
   "opencode.ai": () => new Response(GO_BODY, { status: 200 }),
   "openrouter.ai": () => new Response(OR_BODY, { status: 200 }),
   "chatgpt.com": () =>
@@ -516,6 +557,16 @@ const SIX_PROVIDER_BODIES = {
         : { config: null };
     return new Response(JSON.stringify(body), { status: 200 });
   },
+  "api.github.com": () =>
+    new Response(
+      JSON.stringify({
+        copilot_plan: "pro",
+        token_based_billing: true,
+        quota_reset_date_utc: new Date(Date.now() + 86_400_000).toISOString(),
+        quota_snapshots: { premium_interactions: { percent_remaining: 66.5, unlimited: false } },
+      }),
+      { status: 200 },
+    ),
 };
 
 const ALL_CONFIGURED = {
@@ -525,11 +576,12 @@ const ALL_CONFIGURED = {
   "kimi-coding": true,
   zai: true,
   xai: true,
+  "github-copilot": true,
 };
 
-test("extension: six providers render independently without conflation", async () => {
+test("extension: seven providers render independently without conflation", async () => {
   const harness = setupExtension();
-  installFetch(SIX_PROVIDER_BODIES, harness.fetchCalls);
+  installFetch(SEVEN_PROVIDER_BODIES, harness.fetchCalls);
   const { ctx, handles } = makeCtx({
     mode: "tui",
     configured: ALL_CONFIGURED,
@@ -540,8 +592,10 @@ test("extension: six providers render independently without conflation", async (
       "kimi-coding": "k",
       zai: "k",
       xai: "grok-oauth-token",
+      "github-copilot": "ghu-session-token",
     },
-    oauthByKey: { "openai-codex": true, xai: true },
+    oauthByKey: { "openai-codex": true, xai: true, "github-copilot": true },
+    authBaseUrl: { "github-copilot": "https://api.business.githubcopilot.com" },
   });
 
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
@@ -574,6 +628,12 @@ test("extension: six providers render independently without conflation", async (
   assert.ok(lines.includes("Grok coding credits"));
   assert.ok(/current period \(weekly\)/.test(lines) && /66.5% left/.test(lines));
 
+  handles[0]!.component.handleInput("\x1b[C"); // GitHub Copilot
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(lines.includes("[GitHub Copilot]"));
+  assert.ok(lines.includes("AI-credit allowance"));
+  assert.ok(/66.5% left/.test(lines));
+
   // Grok: identity ran before billing and carried the verified user id.
   const grokCalls = harness.fetchCalls.filter((c) => c.url.includes("cli-chat-proxy.grok.com"));
   assert.ok(grokCalls.length >= 2);
@@ -588,6 +648,15 @@ test("extension: six providers render independently without conflation", async (
   assert.equal(codexCall!.headers["chatgpt-account-id"], "acct-9");
   const zaiCall = harness.fetchCalls.find((c) => c.url.includes("api.z.ai"));
   assert.equal(zaiCall!.headers.authorization, "k", "zai uses the raw key");
+
+  // Copilot request used the fixed endpoint, the session bearer token, and
+  // the source-derived client headers.
+  const copilotCall = harness.fetchCalls.find((c) => c.url === "https://api.github.com/copilot_internal/user");
+  assert.ok(copilotCall, "copilot quota request issued");
+  assert.equal(copilotCall!.headers.authorization, "Bearer ghu-session-token");
+  assert.equal(copilotCall!.headers["copilot-integration-id"], "vscode-chat");
+  assert.equal(copilotCall!.headers["user-agent"], "GitHubCopilotChat/0.35.0");
+  assert.equal(copilotCall!.headers["editor-version"], "vscode/1.107.0");
 
   handles[0]!.done(undefined);
   await handlerPromise;
@@ -617,6 +686,56 @@ test("extension: codex without OAuth provenance shows an error, others unaffecte
   lines = handles[0]!.component.render(100).join("\n");
   assert.ok(/auth: Codex quota requires subscription OAuth credentials/.test(lines));
   assert.ok(!harness.fetchCalls.some((c) => c.url.includes("chatgpt.com")), "no codex request issued");
+
+  handles[0]!.done(undefined);
+  await handlerPromise;
+});
+
+test("extension: copilot without OAuth provenance shows an error, others unaffected", async () => {
+  const harness = setupExtension();
+  installFetch(
+    {
+      "opencode.ai": () => new Response(GO_BODY, { status: 200 }),
+      "api.github.com": () => new Response("{}", { status: 200 }),
+    },
+    harness.fetchCalls,
+  );
+  const { ctx, handles } = makeCtx({
+    mode: "tui",
+    configured: { "opencode-go": true, "github-copilot": true },
+    authByKey: { "opencode-go": "k", "github-copilot": "ghp-not-oauth" },
+    oauthByKey: { "github-copilot": false },
+  });
+
+  const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  let lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/87\.5% left/.test(lines), "other providers unaffected");
+  handles[0]!.component.handleInput("\x1b[C"); // GitHub Copilot tab
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/auth: Copilot quota requires subscription OAuth credentials/.test(lines));
+  assert.ok(!harness.fetchCalls.some((c) => c.url.includes("api.github.com")), "no copilot request issued");
+
+  handles[0]!.done(undefined);
+  await handlerPromise;
+});
+
+test("extension: copilot OAuth routing through an undeclared origin is refused", async () => {
+  const harness = setupExtension();
+  installFetch({ "api.github.com": () => new Response("{}", { status: 200 }) }, harness.fetchCalls);
+  const { ctx, handles } = makeCtx({
+    mode: "tui",
+    configured: { "github-copilot": true },
+    authByKey: { "github-copilot": "ghu-session-token" },
+    oauthByKey: { "github-copilot": true },
+    authBaseUrl: { "github-copilot": "https://api.business.githubcopilot.com.evil.com" },
+  });
+
+  const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  const lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/auth: Provider routes through a custom base URL; quota lookup refused/.test(lines));
+  assert.equal(harness.fetchCalls.length, 0, "credentials never leave the process");
 
   handles[0]!.done(undefined);
   await handlerPromise;
@@ -793,6 +912,40 @@ test("footer: leading status light reflects headroom tiers", () => {
   assert.ok(!footer(50)!.includes("\u001b"), "no ANSI codes in footer text");
 });
 
+test("footer: nonnumeric allowance states and date-only resets", () => {
+  const now = 1_700_000_000_000;
+  const base = {
+    providerId: "github-copilot", providerName: "GitHub Copilot", domainLabel: "AI-credit allowance", capturedAt: now,
+  };
+  // Unlimited: neutral white light, never a green 100% placeholder.
+  assert.equal(
+    plain(formatFooterText({ ...base, windows: [{ label: "main allowance", status: "unlimited" }] }, { now })),
+    "⚪ Unlimited",
+  );
+  assert.equal(
+    plain(formatFooterText({ ...base, windows: [{ label: "main allowance", status: "unlimited", resetDate: "2026-10-01" }] }, { now })),
+    "⚪ Unlimited · ⏳ 2026-10-01",
+  );
+  // Organization-managed: neutral text, balance not reported.
+  assert.equal(
+    plain(formatFooterText({ ...base, windows: [{ label: "main allowance", status: "organization-managed" }] }, { now })),
+    "⚪ org-managed",
+  );
+  assert.equal(
+    formatFooterText({ ...base, windows: [{ label: "main allowance", status: "organization-managed" }] }, { now, format: "compact" }),
+    "⚪ org-managed",
+  );
+  assert.equal(
+    formatFooterText({ ...base, windows: [{ label: "main allowance", status: "unlimited" }] }, { now, format: "off" }),
+    undefined,
+  );
+  // Date-only reset: calendar date, never a countdown.
+  assert.equal(
+    plain(formatFooterText({ ...base, windows: [{ label: "main allowance", usedPercent: 33.5, resetDate: "2026-10-01" }] }, { now })),
+    "🟢 66.5% left · ⏳ 2026-10-01",
+  );
+});
+
 test("footer: formatFooterError names the kind and retry window", () => {
   assert.equal(formatFooterError("request", 90_000), "🔴 request error · retry 1m");
   assert.equal(formatFooterError("auth", undefined), "🔴 auth error");
@@ -821,7 +974,7 @@ test("extension: session_start refreshes the active provider and sets an additiv
 
 test("extension: model_select switches the footer to the new active provider", async () => {
   const harness = setupExtension();
-  installFetch(SIX_PROVIDER_BODIES, harness.fetchCalls);
+  installFetch(SEVEN_PROVIDER_BODIES, harness.fetchCalls);
   const { ctx, statusCalls } = makeCtx({
     mode: "tui",
     configured: { "opencode-go": true, xai: true },

@@ -140,7 +140,7 @@ export class UsageMonitor {
     const adapter = this.adapterById.get(providerId);
     const entry = this.cache.get(providerId);
     if (session === undefined || adapter === undefined || entry === undefined) return undefined;
-    const auth = await resolveQuotaAuth(session.gateway, providerId, adapter.officialOrigin, adapter.allowedProviderOrigin);
+    const auth = await resolveQuotaAuth(session.gateway, providerId, adapter.officialOrigin, adapter.allowedProviderOrigin, adapter.allowedOAuthOrigins);
     if (auth instanceof UsageError) return undefined;
     if (this.fingerprintOf(auth.apiKey) !== entry.fingerprint) return undefined;
     return entry.usage;
@@ -315,7 +315,7 @@ export class UsageMonitor {
     // completions must not touch cache or footer.
     let callerGaveUp = false;
     const work = async (): Promise<ProviderUsage> => {
-      const auth = await resolveQuotaAuth(session.gateway, adapterId, adapter.officialOrigin, adapter.allowedProviderOrigin);
+      const auth = await resolveQuotaAuth(session.gateway, adapterId, adapter.officialOrigin, adapter.allowedProviderOrigin, adapter.allowedOAuthOrigins);
       if (auth instanceof UsageError) {
         if (this.generation === generation && !callerGaveUp) this.noteFailure(adapterId, undefined);
         return errorUsage(adapter, auth, this.now());

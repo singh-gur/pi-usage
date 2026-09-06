@@ -58,6 +58,8 @@ export async function resolveQuotaAuth(
   officialOrigin: string,
   /** Built-in provider base-URL origin accepted when no auth-level override exists. */
   allowedProviderOrigin?: string,
+  /** Additional exact origins accepted only for OAuth-provenance credentials (Copilot's account-specific routing). */
+  allowedOAuthOrigins?: readonly string[],
 ): Promise<ResolvedQuotaAuth | UsageError> {
   if (!gateway.isConfigured(providerId)) {
     return new UsageError("not-configured", "No credentials configured for this provider");
@@ -75,6 +77,7 @@ export async function resolveQuotaAuth(
   if (!apiKey) {
     return new UsageError("auth", "No usable credentials resolved for this provider");
   }
+  const oauth = resolved.source === "OAuth";
   // Effective routing = auth-level base URL override, else composed provider base URL.
   const authOverride = resolved.auth.baseUrl;
   const effectiveBaseUrl = authOverride ?? gateway.providerInfo(providerId)?.baseUrl;
@@ -83,9 +86,13 @@ export async function resolveQuotaAuth(
     // Custom overrides must point at the official quota origin; without an
     // override, Pi's built-in provider origin is also acceptable when the
     // adapter declares one (same provider, different official endpoints).
+    // OAuth-provenance credentials may additionally route through an exact
+    // adapter-declared origin (Copilot's account-specific OAuth routing);
+    // lookalike, insecure, and undeclared origins stay refused.
     const accepted =
-      origin === officialOrigin ||
-      (authOverride === undefined && allowedProviderOrigin !== undefined && origin === allowedProviderOrigin);
+      origin === officialOrigin
+      || (oauth && allowedOAuthOrigins !== undefined && origin !== undefined && allowedOAuthOrigins.includes(origin))
+      || (authOverride === undefined && allowedProviderOrigin !== undefined && origin === allowedProviderOrigin);
     if (!accepted) {
       return new UsageError(
         "auth",
@@ -93,5 +100,5 @@ export async function resolveQuotaAuth(
       );
     }
   }
-  return { apiKey, oauth: resolved.source === "OAuth" };
+  return { apiKey, oauth };
 }

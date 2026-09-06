@@ -56,7 +56,7 @@ An organization-managed status does not mean unlimited spending or guaranteed ac
 ## Single-Phase Plan
 
 - Objective: Integrate Copilot main allowance with existing command/footer behavior while preserving credential safety and honest quota semantics.
-- Status: Not Started
+- Status: Verification passed (agent-run); awaiting user confirmation
 - Complexity: Medium
 - Estimated Time: One focused implementation pass; live compatibility confirmation is separately user-dependent.
 - Prerequisites: Approved plan; existing provider/auth/monitor infrastructure. No dependency installations authorized.
@@ -79,11 +79,11 @@ An organization-managed status does not mean unlimited spending or guaranteed ac
 
 ## Implementation Tasks
 
-- [ ] **`src/types.ts`, `src/auth.ts`, `src/refresh.ts` — official OAuth routing:** Add optional `allowedOAuthOrigins: readonly string[]` to `QuotaAdapter` and a corresponding optional argument to `resolveQuotaAuth`. Accept this explicit allowlist only when `source === "OAuth"`. Copilot declares exactly `https://api.individual.githubcopilot.com`, `https://api.business.githubcopilot.com`, and `https://api.enterprise.githubcopilot.com`; its quota `officialOrigin` is `https://api.github.com`. Preserve existing `officialOrigin` and `allowedProviderOrigin` behavior for all other adapters. Forward the policy at both refresh and cached-result auth call sites.
+- [x] **`src/types.ts`, `src/auth.ts`, `src/refresh.ts` — official OAuth routing:** Add optional `allowedOAuthOrigins: readonly string[]` to `QuotaAdapter` and a corresponding optional argument to `resolveQuotaAuth`. Accept this explicit allowlist only when `source === "OAuth"`. Copilot declares exactly `https://api.individual.githubcopilot.com`, `https://api.business.githubcopilot.com`, and `https://api.enterprise.githubcopilot.com`; its quota `officialOrigin` is `https://api.github.com`. Preserve existing `officialOrigin` and `allowedProviderOrigin` behavior for all other adapters. Forward the policy at both refresh and cached-result auth call sites.
   - Constraints: no wildcard hosts, custom domains, HTTP origins, lookalike domains, or token-derived request destinations. This changes validation of legitimate OAuth routing, not the fixed quota endpoint.
   - Done when: accepted Copilot routes pass, unsafe routes fail, other provider override tests remain passing, and cache validation uses the same policy as refresh.
 
-- [ ] **`src/providers/github-copilot.ts` — adapter and interpreter:** Export `interpretGitHubCopilot(status, data, now?)` and `githubCopilotAdapter`, following `codex.ts`. Use provider ID `github-copilot` and name `GitHub Copilot`. Require OAuth before any quota request. Make one injected bounded GET to `https://api.github.com/copilot_internal/user`, with `Authorization: Bearer <Pi-resolved token>` and `Accept: application/json`.
+- [x] **`src/providers/github-copilot.ts` — adapter and interpreter:** Export `interpretGitHubCopilot(status, data, now?)` and `githubCopilotAdapter`, following `codex.ts`. Use provider ID `github-copilot` and name `GitHub Copilot`. Require OAuth before any quota request. Make one injected bounded GET to `https://api.github.com/copilot_internal/user`, with `Authorization: Bearer <Pi-resolved token>` and `Accept: application/json`.
   - Use the inspected Copilot client-header convention: `User-Agent: GitHubCopilotChat/0.35.0`, `Editor-Version: vscode/1.107.0`, `Editor-Plugin-Version: copilot-chat/0.35.0`, and `Copilot-Integration-Id: vscode-chat`. Document these constants as source-derived, not a verified endpoint requirement. Do not add token exchange or alternative auth attempts.
   - Validate response records before accessing the selected main snapshot. Accept finite numeric percentages only within `[0, 100]`; preserve real zero. Map remaining percentage to `usedPercent = 100 - percent_remaining`.
   - Apply the display contract above, handling unlimited/organization-managed semantics before placeholder percentages. Do not derive quota counts from entitlement, plan names, or percentages. Missing/invalid main measurement is unsupported rather than zero.
@@ -91,25 +91,25 @@ An organization-managed status does not mean unlimited spending or guaranteed ac
   - Reuse `UsageError`, normalized `ProviderUsage`/`QuotaWindow`, injected requester, and existing transport/monitor bounds. Legitimate numeric allowance with unusable reset data remains usable without a reset.
   - Done when: synthetic response variants produce agreed normalized results and exact request assertions pass without exposing private data.
 
-- [ ] **`src/types.ts`, `src/ui.ts`, adapter parser — nonnumeric allowance and resets:** Reuse `QuotaWindow.status` for fixed `unlimited` and `organization-managed` states. Render them in the dashboard and as neutral nonnumeric footer text, never a green 100% placeholder. Add optional `resetDate: string` for a validated calendar date without a time.
+- [x] **`src/types.ts`, `src/ui.ts`, adapter parser — nonnumeric allowance and resets:** Reuse `QuotaWindow.status` for fixed `unlimited` and `organization-managed` states. Render them in the dashboard and as neutral nonnumeric footer text, never a green 100% placeholder. Add optional `resetDate: string` for a validated calendar date without a time.
   - Prefer a valid `quota_reset_date_utc` timestamp for countdowns. Otherwise preserve a validated date-only `quota_reset_date` or `limited_user_reset_date` as `resetDate`. Missing/invalid dates stay absent; never manufacture midnight or infer replenishment after a reset passes.
   - Render date-only values as calendar dates in the dashboard and full footer, not countdowns. Preserve full/compact/off modes; full mode retains age/stale information. Existing providers' rendering must not change.
   - Done when: numeric, unlimited, organization-managed, timestamp, and date-only output have passing rendering checks, including narrow-width behavior.
 
-- [ ] **`src/index.ts`, existing test files — integration:** Append Copilot to `ADAPTERS`. Extend the six-provider integration fixture to seven providers and extend mocked public auth to include an auth-level base URL.
+- [x] **`src/index.ts`, existing test files — integration:** Append Copilot to `ADAPTERS`. Extend the six-provider integration fixture to seven providers and extend mocked public auth to include an auth-level base URL.
   - Parser coverage: AI-credit, explicit legacy, and unspecified billing mode; Free-plan main selection; zero/fractional/missing/invalid/out-of-range percentages; unlimited and organization-managed snapshots; valid timestamps/date-only resets and invalid dates.
   - Request/auth coverage: exact fixed destination and headers; non-OAuth rejection makes zero quota calls; exact official origin acceptance; custom/lookalike/insecure origin rejection; consistent refresh and cache validation.
   - Integration coverage: independent dashboard tabs/errors, active-provider footer, account-cache separation, and inherited offline/settings behavior. Reuse existing monitor tests rather than introducing a second scheduler or test framework.
   - Done when: Copilot runs through mocked public Pi APIs, all existing provider regressions pass, and no new dependency/configuration/auth store appears.
 
-- [ ] **`README.md`, `AGENTS.md` — support boundaries:** Document provider ID, main-quota scope, OAuth requirement, explicit official-routing exception, and undocumented-endpoint limitation. Keep compatibility claims at the inspected Pi 0.85.1 contract.
+- [x] **`README.md`, `AGENTS.md` — support boundaries:** Document provider ID, main-quota scope, OAuth requirement, explicit official-routing exception, and undocumented-endpoint limitation. Keep compatibility claims at the inspected Pi 0.85.1 contract.
   - Done when: guidance reflects implemented behavior and does not describe either personal or organization account support as live-verified without corresponding user confirmation.
 
 ## Verification
 
-- [ ] `pnpm test` — all synthetic provider, routing, monitor, integration, and rendering checks pass; no live authenticated requests or paid model calls.
-- [ ] `pnpm run typecheck` — passes with no emitted runtime files.
-- [ ] `pnpm run pack:check` — passes and contains only intended distributable files.
+- [x] `pnpm test` — all synthetic provider, routing, monitor, integration, and rendering checks pass; no live authenticated requests or paid model calls.
+- [x] `pnpm run typecheck` — passes with no emitted runtime files.
+- [x] `pnpm run pack:check` — passes and contains only intended distributable files.
 - [ ] User-owned personal-account compatibility comparison: user compares `/usage` with GitHub locally and reports sanitized results only, without tokens, raw responses, or account identifiers.
 - [ ] User-owned organization-account compatibility comparison: tracked separately; no organization-wide balance claim based on a per-user snapshot.
 

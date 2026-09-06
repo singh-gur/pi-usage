@@ -151,6 +151,50 @@ test("auth: built-in provider origin is accepted only without an auth-level over
   assert.ok(refused instanceof UsageError && refused.kind === "auth", "auth-level override must still match the quota origin");
 });
 
+const COPILOT_QUOTA = "https://api.github.com";
+const COPILOT_OAUTH_ORIGINS = [
+  "https://api.individual.githubcopilot.com",
+  "https://api.business.githubcopilot.com",
+  "https://api.enterprise.githubcopilot.com",
+] as const;
+
+test("auth: Copilot OAuth routing accepts the exact declared origins only", async () => {
+  const resolve = (resolved: PiAuthResult, origins?: readonly string[]) =>
+    resolveQuotaAuth(gateway({ configured: true, resolved }), "github-copilot", COPILOT_QUOTA, undefined, origins);
+
+  for (const origin of COPILOT_OAUTH_ORIGINS) {
+    const ok = await resolve({ auth: { apiKey: "tok", baseUrl: origin }, source: "OAuth" }, COPILOT_OAUTH_ORIGINS);
+    assert.deepEqual(ok, { apiKey: "tok", oauth: true }, origin);
+  }
+  // OAuth-provenance provider-level routing (no auth override) is accepted too.
+  const providerLevel = await resolveQuotaAuth(
+    gateway({ configured: true, resolved: { auth: { apiKey: "tok" }, source: "OAuth" }, providerBaseUrl: "https://api.business.githubcopilot.com" }),
+    "github-copilot",
+    COPILOT_QUOTA,
+    undefined,
+    COPILOT_OAUTH_ORIGINS,
+  );
+  assert.deepEqual(providerLevel, { apiKey: "tok", oauth: true });
+  // The official quota origin remains accepted regardless of allowlist/provenance.
+  assert.deepEqual(
+    await resolve({ auth: { apiKey: "tok", baseUrl: "https://api.github.com/copilot_internal" }, source: "stored" }, COPILOT_OAUTH_ORIGINS),
+    { apiKey: "tok", oauth: false },
+  );
+
+  const refused: Array<[string, PiAuthResult, readonly string[] | undefined]> = [
+    ["lookalike domain", { auth: { apiKey: "tok", baseUrl: "https://api.business.githubcopilot.com.evil.com" }, source: "OAuth" }, COPILOT_OAUTH_ORIGINS],
+    ["insecure http origin", { auth: { apiKey: "tok", baseUrl: "http://api.individual.githubcopilot.com" }, source: "OAuth" }, COPILOT_OAUTH_ORIGINS],
+    ["custom proxy", { auth: { apiKey: "tok", baseUrl: "https://proxy.example.com/v1" }, source: "OAuth" }, COPILOT_OAUTH_ORIGINS],
+    ["non-OAuth provenance", { auth: { apiKey: "tok", baseUrl: "https://api.individual.githubcopilot.com" }, source: "stored" }, COPILOT_OAUTH_ORIGINS],
+    ["undeclared allowlist", { auth: { apiKey: "tok", baseUrl: "https://api.individual.githubcopilot.com" }, source: "OAuth" }, undefined],
+  ];
+  for (const [label, resolved, origins] of refused) {
+    const result = await resolve(resolved, origins);
+    assert.ok(result instanceof UsageError && result.kind === "auth", label);
+    assert.equal(result.message, "Provider routes through a custom base URL; quota lookup refused", label);
+  }
+});
+
 // ----------------------------------------------------------------------- http
 
 type FetchCall = { url: string; headers: Record<string, string>; opts: RequestInit };
@@ -723,6 +767,55 @@ test("monitor: PI_OFFLINE suppresses quota networking", async () => {
     env.monitor.shutdown();
   } finally {
     delete process.env.PI_OFFLINE;
+    mock.timers.reset();
+  }
+});
+
+test("monitor: refresh and cached-result validation share the OAuth-origin routing policy", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const adapter: QuotaAdapter = {
+      id: "github-copilot",
+      name: "GitHub Copilot",
+      officialOrigin: "https://api.github.com",
+      allowedOAuthOrigins: ["https://api.business.githubcopilot.com"],
+      domainLabel: "test quota",
+      async fetchQuota(_auth, getJson) {
+        const response = await getJson("https://api.github.com/copilot_internal/user", {});
+        if (response.status !== 200) throw new UsageError("request", `HTTP ${response.status}`);
+        return {
+          providerId: "github-copilot",
+          providerName: "GitHub Copilot",
+          domainLabel: "test quota",
+          capturedAt: Date.now(),
+          windows: [{ label: "main allowance", usedPercent: 37.5 }],
+        };
+      },
+    };
+    const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+    const session: MonitorSession = {
+      gateway: {
+        isConfigured: () => true,
+        resolveAuth: async () => ({ auth: { apiKey: "tok", baseUrl: "https://api.business.githubcopilot.com" }, source: "OAuth" }),
+        providerInfo: () => undefined,
+      },
+      mode: "tui",
+      setStatus: (key, text) => statusCalls.push({ key, text }),
+    };
+    const calls: string[] = [];
+    const monitor = new UsageMonitor({
+      adapters: [adapter],
+      createRequester: () => async (url: string) => {
+        calls.push(url);
+        return { status: 200, data: {} };
+      },
+    });
+    monitor.startSession(session, "github-copilot");
+    await drain();
+    assert.equal(calls.length, 1, "refresh accepted the OAuth routing origin");
+    assert.ok(await monitor.serveCached("github-copilot"), "cache validation applies the same policy");
+    monitor.shutdown();
+  } finally {
     mock.timers.reset();
   }
 });

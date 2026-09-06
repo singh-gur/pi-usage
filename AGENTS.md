@@ -7,9 +7,19 @@ Repo-scoped rules for agents working in `pi-usage`. The global rules in
 
 `pi-usage` is an independently implemented, read-only Pi extension package
 that reports provider subscription quota (Codex, OpenCode Go, Z.ai, Kimi,
-Grok) and OpenRouter key allowance through a `/usage` command and an additive
-footer indicator. Package settings are managed through `/usage-settings` and
-package-owned `pi-usage.json` files; project overrides must remain trust-gated.
+Grok, GitHub Copilot) and OpenRouter key allowance through a `/usage` command
+and an additive footer indicator. Package settings are managed through
+`/usage-settings` and package-owned `pi-usage.json` files; project overrides
+must remain trust-gated.
+
+GitHub Copilot (`github-copilot`) reports the main allowance only,
+percentage-based, from the undocumented `api.github.com/copilot_internal/user`
+endpoint using the Pi-resolved OAuth session token. Its account-specific
+OAuth origins are the sole accepted alternate routing (`allowedOAuthOrigins`);
+support is not live-verified until the user reports a sanitized comparison
+for that account class. Custom enterprise hosts, token exchanges, and
+credential fallbacks are out of scope; if the token is rejected, stop and
+record the blocker instead of widening auth access.
 
 Do not widen compatibility claims beyond the inspected Pi 0.85.1 API.
 

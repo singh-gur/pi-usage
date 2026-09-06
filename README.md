@@ -11,6 +11,7 @@ A read-only [Pi](https://github.com/earendil-works/pi-coding-agent) extension th
 | Z.ai Coding Plan | `zai` | Coding allowance (5-hour and weekly windows); monthly MCP/tool allowance shown separately |
 | Kimi Coding | `kimi-coding` | Main allowance and rolling windows (provider allowance units, not model tokens) |
 | Grok / xAI subscription | `xai` | Coding-credit allowance for the current period (weekly/monthly); does not cover all Grok chat quotas |
+| GitHub Copilot | `github-copilot` | Main allowance percentage (AI-credit or legacy premium-request depending on billing mode); unlimited and organization-managed accounts report a nonnumeric state |
 | OpenRouter key | `openrouter` | Key spending cap, remaining dollars, and reported spending |
 
 Providers without credentials configured in Pi are omitted entirely. One account per provider.
@@ -42,7 +43,7 @@ git clone git@github.com:singh-gur/pi-usage.git
 pi -e ./pi-usage/src/index.ts
 ```
 
-Credentials are resolved exclusively through Pi (`/login <provider>`); the extension never reads credential stores, `.env` files, or browsers. Codex and Grok quota requires OAuth (subscription) credentials — plain API keys are rejected before any request.
+Credentials are resolved exclusively through Pi (`/login <provider>`); the extension never reads credential stores, `.env` files, or browsers. Codex, Grok, and Copilot quota requires OAuth (subscription) credentials — plain API keys are rejected before any request.
 
 ## Usage
 
@@ -93,6 +94,7 @@ All automatic networking is TUI-only and suppressed under `PI_OFFLINE`; print/JS
 - Failures render as fixed, sanitized error categories (auth, subscription, unsupported, request, timeout); raw bodies, tokens, and account identifiers are never displayed.
 - A passed reset time means fresh data is needed, never an assumed replenishment.
 - Known limitation (Grok free plans): the billing endpoint's payload for an account without coding credits is indistinguishable from a paid account at 0% after reset, so the weekly period shows as fully remaining even though model calls may fail with the model API's own credit error.
+- Known limitation (GitHub Copilot): quota comes from an undocumented internal endpoint (`api.github.com/copilot_internal/user`) using the session token Pi resolves from its OAuth login; acceptance of that token is not guaranteed and shows as an auth error if refused. Percentage-only reporting: unlimited personal plans show `Unlimited`, organization-provided and unclassifiable accounts show `Organization-managed` (balance not reported), and no request counts, currency totals, or organization-wide budgets are inferred. Copilot OAuth routing through Pi's account-specific official origins (`api.individual|business|enterprise.githubcopilot.com`) is the only accepted alternate routing; custom enterprise hosts are out of scope.
 
 ## Development
 

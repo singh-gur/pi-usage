@@ -28,6 +28,7 @@ import { codexAdapter } from "./providers/codex.ts";
 import { kimiAdapter } from "./providers/kimi.ts";
 import { zaiAdapter } from "./providers/zai.ts";
 import { grokAdapter } from "./providers/grok.ts";
+import { githubCopilotAdapter } from "./providers/github-copilot.ts";
 
 /** Fixed supported-provider list. */
 const ADAPTERS: readonly QuotaAdapter[] = [
@@ -37,6 +38,7 @@ const ADAPTERS: readonly QuotaAdapter[] = [
   kimiAdapter,
   zaiAdapter,
   grokAdapter,
+  githubCopilotAdapter,
 ];
 
 function sessionFrom(ctx: {

@@ -29,6 +29,11 @@ export interface QuotaWindow {
    * instead of a timestamp. Never converted into a countdown.
    */
   resetCadence?: string;
+  /**
+   * Validated calendar date (YYYY-MM-DD) for providers that report only a
+   * date, not a timestamp. Rendered as a calendar date, never a countdown.
+   */
+  resetDate?: string;
   /** Provider-reported window status, e.g. "ok", "rate-limited". */
   status?: string;
 }
@@ -88,6 +93,12 @@ export interface QuotaAdapter {
    * no auth-level override; custom overrides must still match officialOrigin.
    */
   allowedProviderOrigin?: string;
+  /**
+   * Additional exact origins accepted only for OAuth-provenance credentials
+   * (Copilot's account-specific OAuth routing). Fixed allowlist, no
+   * wildcards; all other routing must still match `officialOrigin`.
+   */
+  allowedOAuthOrigins?: readonly string[];
   domainLabel: string;
   fetchQuota(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ProviderUsage>;
 }
