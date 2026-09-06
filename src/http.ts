@@ -1,7 +1,7 @@
 /**
  * Bounded, read-only HTTP for quota endpoints.
  *
- * Safety rules (from PLAN.md):
+ * Safety invariants:
  * - GET only, fixed https URLs, no URL credentials, redirects rejected.
  * - 10s per request timeout, 128 KiB max body.
  * - Errors are sanitized: no raw upstream exception messages or bodies leak.

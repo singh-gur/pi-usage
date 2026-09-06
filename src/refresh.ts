@@ -2,7 +2,7 @@
  * In-memory quota cache, refresh scheduling, deduplication, and backoff for
  * the automatic active-provider footer indicator.
  *
- * Safety rules (from PLAN.md):
+ * Safety invariants:
  * - Cache lives in memory only, partitioned by a salted in-process credential
  *   fingerprint; credentials never appear in keys or persisted artifacts, and
  *   another account's cached result is never served.

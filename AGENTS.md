@@ -10,14 +10,7 @@ that reports provider subscription quota (Codex, OpenCode Go, Z.ai, Kimi,
 Grok) and OpenRouter key allowance through a `/usage` command and an additive
 footer indicator.
 
-- `PLAN.md` is the user-approved implementation plan. It is the source of
-  truth for scope, contracts, phases, and verification. Do not implement
-  outside approved scope; do not widen compatibility claims beyond the
-  inspected Pi 0.85.1 API.
-- Phase order is strictly sequential: Phase 1 → 2 → `/usage` visual refinement
-  → 3 → 4. Start dependent work from the preceding accepted checkpoint.
-- Scope changes go back through the plan workflow and require user approval
-  before any code or tracking reflects them.
+Do not widen compatibility claims beyond the inspected Pi 0.85.1 API.
 
 ## Commands
 
@@ -48,25 +41,20 @@ step; Pi loads TypeScript extension entry points directly.
 ## Git and checkpoints
 
 - Installation changes, commits, tags, pushes, and publication require
-  separate explicit authorization. Plan approval or phase completion alone
-  is insufficient.
-- After a phase is accepted, commit the checkpoint and create a
-  `pi-usage-phase-N` tag. Never move or overwrite an existing checkpoint tag.
+  separate explicit authorization.
+- Never move or overwrite an existing tag.
 - Shared branch, no parallel writers needed. Keep diffs minimal and scoped
-  to the active plan task.
+  to the active task.
 
 ## Kaneo task tracking
 
 Live execution progress is tracked in Kaneo through the Kaneo MCP tools
 (`kaneo_*` native tools or the `kaneo` MCP gateway). Keep the board in sync
-with reality throughout every work session. Approved scope lives in
-`PLAN.md`; execution state lives in Kaneo. Never rewrite approved plan scope
-to match board activity, and never treat board state as phase approval.
+with reality throughout every work session; never treat board state as phase
+approval.
 
-The plan has already been imported to Kaneo. Workspace: **Home Projects**;
-project: **Pi Usage** (`fu8gwyw0lnnjl67qz5314gw5`). One task per phase plus
-the approved blocking pre-phase-3 UI refinement, with implementation steps as
-a checklist in each task description and a plan reference:
+The completed phased implementation is tracked in workspace **Home Projects**,
+project **Pi Usage** (`fu8gwyw0lnnjl67qz5314gw5`):
 
 | Task | ID | Number |
 | --- | --- | --- |
@@ -113,25 +101,16 @@ Column slugs in this project: `to-do`, `in-progress`, `in-review`, `done`
   assignments, and unrelated description content.
 - Never assign people, due dates, or priorities that were not requested,
    and never invent them to make the board look complete.
-- Ask before deleting tasks or moving work between projects. Do not
-  automatically delete tasks for removed plan phases; propose a superseded
-  disposition instead.
+- Ask before deleting tasks or moving work between projects.
 - After a timeout or uncertain create/update result, re-read the task
   before retrying. Never blindly repeat creates or comments.
 - Report what actually succeeded after mutations; if a batch partially
   fails, list successful and unresolved operations with their task IDs.
 - Do not upload secrets, credentials, tokens, or private data to Kaneo.
 
-### Plan changes
-
-When `PLAN.md` changes after approval: compare the plan against linked
-Kaneo tasks, report added/changed/removed/ambiguous work, preview the
-reconciliation batch, and apply it only after user approval. Keep
-unapproved plan changes out of the tracked execution scope.
-
 ### Progress reports
 
 When asked for status, show task IDs, work by state (completed / active /
-blocked / not started), outstanding verification or user approvals, plan
-drift, and the next ready task with why its prerequisites are satisfied.
+blocked / not started), outstanding verification or user approvals, and the
+next ready task with why its prerequisites are satisfied.
 Count tasks explicitly; never invent percentage-complete estimates.
