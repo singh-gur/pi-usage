@@ -40,7 +40,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/singh-gur/pi-usage/main/assets/screenshots/dashboard.png"
   },
   "scripts": {
     "test": "node --test test/*.test.ts",

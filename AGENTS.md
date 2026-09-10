@@ -23,6 +23,11 @@ record the blocker instead of widening auth access.
 
 Do not widen compatibility claims beyond the inspected Pi 0.85.1 API.
 
+README screenshots live in `assets/screenshots/` and depict real UI output
+with synthetic data, not live account verification. The README and `pi.image`
+gallery metadata use absolute GitHub raw URLs; push the assets before publishing
+a package that references them. These images are not bundled in the npm tarball.
+
 ## Commands
 
 Commands (pnpm 11.1.2, recorded in `packageManager`; build-script and run-check
@@ -81,6 +86,7 @@ Post-v1 standalone work:
 | --- | --- | --- |
 | Package settings mechanism | `kq5v82gmkqmr8nna88lj7odg` | #6 |
 | GitHub Copilot provider (`plans/github-copilot.md`) | `f8nff61ksk7p3621svfwz639` | #7 |
+| README refresh and package gallery screenshots | `gw90cg6mfw89hbvjr7q1b8b7` | #8 |
 
 Do not re-import or create duplicate phase tasks; always reuse these IDs.
 Add subtasks only when a step needs independent ownership, blocking, or

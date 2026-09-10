@@ -1,70 +1,123 @@
 # pi-usage
 
-A read-only [Pi](https://github.com/earendil-works/pi-coding-agent) extension that reports provider subscription quotas and key allowances: a `/usage` dashboard for every configured supported provider, plus a compact footer indicator for the active provider.
+**Know what’s left. Know when it resets. Keep coding.**
 
-## Supported providers
+Your provider allowances, inside [Pi](https://pi.dev). Check subscription windows and OpenRouter key spending with `/usage`, or keep your active provider’s remaining allowance in the footer. No dashboard hopping. No separate login to manage.
 
-| Provider | Pi id | What is reported |
-| --- | --- | --- |
-| OpenAI Codex (ChatGPT subscription) | `openai-codex` | Shared rate-limit windows and separate model-specific groups |
-| OpenCode Go | `opencode-go` | Rolling / weekly / monthly consumed percent |
-| Z.ai Coding Plan | `zai` | Coding allowance (5-hour and weekly windows); monthly MCP/tool allowance shown separately |
-| Kimi Coding | `kimi-coding` | Main allowance and rolling windows (provider allowance units, not model tokens) |
-| Grok / xAI subscription | `xai` | Coding-credit allowance for the current period (weekly/monthly); does not cover all Grok chat quotas |
-| GitHub Copilot | `github-copilot` | Main allowance percentage (AI-credit or legacy premium-request depending on billing mode); unlimited and organization-managed accounts report a nonnumeric state |
-| OpenRouter key | `openrouter` | Key spending cap, remaining dollars, and reported spending |
+[Install](#get-started) · [Providers](#supported-providers) · [Settings](#make-it-yours) · [npm](https://www.npmjs.com/package/@singh-gur/pi-usage)
 
-Providers without credentials configured in Pi are omitted entirely. One account per provider.
+![The usage dashboard on the OpenAI Codex tab: 68% of the five-hour allowance and 82% of the weekly allowance remaining, with reset countdowns.](https://raw.githubusercontent.com/singh-gur/pi-usage/main/assets/screenshots/dashboard.png)
 
-## Installation
+*Demo screenshots render the extension’s actual UI output with synthetic data. They are not live account results; colors and spacing depend on your terminal and Pi theme.*
 
-Requires Node.js ≥ 24.16 and Pi ≥ 0.85.1.
+## Get started
 
-Install from npm (recommended; tagged releases, updated via `pi update --extensions`):
-
-```
+```bash
 pi install npm:@singh-gur/pi-usage
 ```
 
-Or pin to a version:
+Start Pi, or run `/reload` in an existing session. If your supported providers are already configured in Pi, you’re ready:
 
-```
-pi install npm:@singh-gur/pi-usage@1.2.0
+```text
+/usage
 ```
 
-Or install from this Git repository (latest commit, unpinned installs are reconciled by `pi update --extensions`):
+Otherwise, run `/login` in Pi to configure a supported provider first. **Codex, Grok, and GitHub Copilot require subscription OAuth credentials**, not plain API keys. The extension uses the credentials Pi resolves—there is no second credential setup.
 
+Requires **Node.js ≥ 24.16**. Built against the **Pi 0.85.1 public API**; compatibility with other versions has not been independently verified.
+
+<details>
+<summary>Try without a permanent install, install from Git, or update</summary>
+
+Try for the current run:
+
+```bash
+pi -e npm:@singh-gur/pi-usage
 ```
+
+Install from Git:
+
+```bash
 pi install git:github.com/singh-gur/pi-usage
 ```
 
-Tags `pi-usage-phase-1` … `pi-usage-phase-4` are published development checkpoints; `v*` tags mark npm releases.
+Update your installed Pi packages:
 
-The `https://` protocol URL form works too: `pi install https://github.com/singh-gur/pi-usage`. Review the source before installing — Pi packages run with full system access.
-
-From a Git checkout (local development):
-
-```
-git clone git@github.com:singh-gur/pi-usage.git
-pi -e ./pi-usage/src/index.ts
+```bash
+pi update --extensions
 ```
 
-Credentials are resolved exclusively through Pi (`/login <provider>`); the extension never reads credential stores, `.env` files, or browsers. Codex, Grok, and Copilot quota requires OAuth (subscription) credentials — plain API keys are rejected before any request.
+To pin a release, append `@<version>` to the npm package spec. Pinned versions are skipped by package updates.
 
-## Usage
+</details>
 
-Run `/usage` in Pi (TUI mode) for a scrollable, tabbed dashboard: one tab per configured provider, consumed/remaining bars where a ratio is safe, reset timing, exact values, and explicit partial/error states. The view dismisses with `esc`/`enter`/`q`.
+## One command. A clearer picture.
 
-The footer indicator is additive (`setStatus`, never a footer replacement) and shows, for the active provider only: remaining allowance, reset countdown where known, data age, and explicit `stale` / error labels.
+- **See your headroom.** Remaining percentages or amounts, quota bars, and reset timing where the provider reports them.
+- **Check multiple providers.** A tab for each configured supported provider; shared and model-specific windows stay separate.
+- **Stay in flow.** An automatic, active-provider footer indicator adds to Pi’s existing status area instead of replacing it.
+- **Know when data needs attention.** Partial results, stale data, and errors are labelled—not disguised as a healthy balance. One provider’s failure does not hide the others.
+- **No model calls to check usage.** Quota lookups are read-only requests to provider endpoints, not prompts or inference requests.
 
-## Settings
+### Subscription windows and key spending—not the same thing
 
-Run `/usage-settings` to edit global or trusted project settings. Changes apply immediately and are saved to:
+Each provider keeps its own units and quota scope. For OpenRouter, that means dollars against the **current key’s spending cap**, not an estimate of account-wide credit:
 
-- Global: `~/.pi/agent/pi-usage.json`
-- Project: `<cwd>/.pi/pi-usage.json` (overrides global values and is read only for trusted projects)
+![The OpenRouter tab shows $74.50 remaining against a $100 key cap, $25.50 used, and a monthly reset cadence.](https://raw.githubusercontent.com/singh-gur/pi-usage/main/assets/screenshots/openrouter.png)
 
-The files can also be edited directly; run `/reload` afterward. Unknown or invalid values are ignored with a warning.
+Filled bars show **consumed** allowance; the label beside each bar shows **what remains**. Unknown ratios stay text-only rather than getting a misleading bar.
+
+| In `/usage` | Keys |
+| --- | --- |
+| Switch provider | `←` / `→`, `h` / `l`, `Tab` / `Shift+Tab` |
+| Scroll | `↑` / `↓`, `j` / `k`, `Page Up` / `Page Down`, `Home` / `End` |
+| Close | `Esc`, `Enter`, or `q` |
+
+### A glance instead of another command
+
+The footer follows your active provider and shows its **primary quota window**. Choose full detail, a compact remaining value, or turn it off.
+
+![Footer examples: full shows 68% left and a 2-hour 14-minute reset countdown; compact shows 68%; stale adds a data-age and stale label.](https://raw.githubusercontent.com/singh-gur/pi-usage/main/assets/screenshots/footer.png)
+
+The status light reflects remaining headroom: green above 40%, yellow at 40% or less, red at 15% or less, and neutral when no ratio is available. Open `/usage` for secondary windows and the full picture.
+
+## Supported providers
+
+| Provider | What you can check |
+| --- | --- |
+| **OpenAI Codex** · `openai-codex` | ChatGPT subscription rate-limit windows, including shared and separate model-specific groups. |
+| **OpenCode Go** · `opencode-go` | Rolling, weekly, and monthly allowance. |
+| **Z.ai Coding Plan** · `zai` | Five-hour and weekly coding allowance; monthly MCP/tool allowance shown separately. |
+| **Kimi Coding** · `kimi-coding` | Main allowance and rolling windows in provider allowance units—not model tokens. |
+| **Grok / xAI** · `xai` | Coding-credit allowance for the current weekly or monthly period—not all Grok chat quotas. |
+| **GitHub Copilot** · `github-copilot` | Main allowance percentage for AI-credit or legacy premium-request billing. See the account-support caveat below. |
+| **OpenRouter** · `openrouter` | Current key spending cap, remaining dollars, and reported spending—not account-wide credit. |
+
+Only configured supported providers appear. One account per provider.
+
+### Provider caveats worth knowing
+
+- **GitHub Copilot:** uses the undocumented `api.github.com/copilot_internal/user` endpoint with Pi’s resolved OAuth session token. Token acceptance and account-class support are **not live-verified**; a rejected token shows an auth error, with no credential fallback. Unlimited personal plans show `Unlimited`; organization-provided and unclassifiable accounts show `Organization-managed`, without an inferred balance. No request counts, currency totals, or organization-wide budgets are inferred. Pi’s official account-specific Copilot OAuth origins are accepted; custom enterprise hosts are not.
+- **Grok free plans:** the billing response can look like a paid account with unused coding credits. The view may show a fully remaining weekly allowance even when model calls fail for lack of credits. It is not proof of a paid entitlement.
+- **OpenRouter:** an uncapped key does not mean unlimited account credit.
+- **All providers:** reset times are informational. A passed reset triggers a need for fresh data, not an assumption that quota has replenished. Missing or malformed values stay unknown; legitimate zeros stay zero.
+
+## Make it yours
+
+Run `/usage-settings` to choose **Global** or **Project** settings. Changes apply immediately and are saved; project overrides are available only for trusted projects.
+
+| Setting | Options | Default |
+| --- | --- | --- |
+| Footer format | `full`, `compact`, `off` | `full` |
+| Poll interval | Off, 1, 5, 15, or 30 minutes | 5 minutes |
+| Refresh after turn | On / off | On |
+
+**Prefer manual checks only?** Set the footer to `off`. This removes the indicator and disables automatic quota networking; `/usage` still works. Setting only the poll interval to off stops the timer, not session, provider-switch, or enabled after-turn refreshes.
+
+<details>
+<summary>Configuration files and refresh behavior</summary>
+
+Settings live in `~/.pi/agent/pi-usage.json` globally and `<cwd>/.pi/pi-usage.json` for trusted project overrides. Project values take precedence; unspecified values inherit. If you edit a file directly, run `/reload`. Unknown or invalid values are ignored with a warning.
 
 ```json
 {
@@ -74,41 +127,43 @@ The files can also be edited directly; run `/reload` afterward. Unknown or inval
 }
 ```
 
-| Setting | Values | Default |
-| --- | --- | --- |
-| `footerFormat` | `"full"`, `"compact"`, `"off"` | `"full"` |
-| `pollIntervalMinutes` | `0`, `1`, `5`, `15`, `30` (`0` disables polling) | `5` |
-| `refreshAfterTurn` | boolean | `true` |
+With the footer enabled:
 
-`compact` shows only the status light and remaining value. `off` removes the footer and its automatic network activity; manual `/usage` refreshes remain available.
+- Session start and a switch to a different provider refresh the active provider. Switching models within the same provider does not re-fetch.
+- After a settled turn, enabled refreshes run only when cached data is at least 60 seconds old or a reset time has passed.
+- Periodic polling refreshes only the active provider at the configured interval.
+- Overlapping requests are deduplicated. Failures back off from 30 seconds to a five-minute cap, with valid server `Retry-After` guidance honored.
+- `/usage` refreshes all configured supported providers, bypassing cache age but respecting backoff.
 
-## Automatic refresh schedule
+Print, JSON, and RPC modes remain silent. `PI_OFFLINE` suppresses quota networking, including manual requests.
 
-All automatic networking is TUI-only and suppressed under `PI_OFFLINE`; print/JSON/RPC modes stay silent.
+</details>
 
-- **Session start and model switch:** refresh the active provider (model switches within the same provider do not re-fetch — the quota is unchanged).
-- **After each turn** (`agent_settled`): when enabled, refresh only when cached data is ≥ 60 s old or a reset time has passed.
-- **Periodic poll:** every 5 minutes by default; configurable or disabled. Only the active provider is polled.
-- Overlapping command/event/timer requests are deduplicated; failed refreshes back off exponentially (30 s doubling, 5 min cap) and valid server `Retry-After` guidance is honored.
-- `/usage` bypasses cache age but respects server-imposed backoff.
+## Read-only by design
 
-## Data, errors, and safety
+Quota requests are **GET-only, to fixed official provider endpoints**. No billing changes, inference requests, or model-context injection. Custom provider base URLs and proxies are refused before credentials are sent, apart from the explicitly allowed official Copilot OAuth routing.
 
-- Every network call is a GET to a fixed official provider endpoint (no writes, no inference calls). Custom provider base URLs/proxies are refused before credentials leave the process.
-- Quota results are in-memory only, partitioned by a salted per-process credential fingerprint: switching accounts never shows the previous account's data.
-- Legitimate zeros are preserved; missing, malformed, or unsupported values stay unknown — never reported as zero.
-- Failures render as fixed, sanitized error categories (auth, subscription, unsupported, request, timeout); raw bodies, tokens, and account identifiers are never displayed.
-- A passed reset time means fresh data is needed, never an assumed replenishment.
-- Known limitation (Grok free plans): the billing endpoint's payload for an account without coding credits is indistinguishable from a paid account at 0% after reset, so the weekly period shows as fully remaining even though model calls may fail with the model API's own credit error.
-- Known limitation (GitHub Copilot): quota comes from an undocumented internal endpoint (`api.github.com/copilot_internal/user`) using the session token Pi resolves from its OAuth login; acceptance of that token is not guaranteed and shows as an auth error if refused. Percentage-only reporting: unlimited personal plans show `Unlimited`, organization-provided and unclassifiable accounts show `Organization-managed` (balance not reported), and no request counts, currency totals, or organization-wide budgets are inferred. Copilot OAuth routing through Pi's account-specific official origins (`api.individual|business|enterprise.githubcopilot.com`) is the only accepted alternate routing; custom enterprise hosts are out of scope.
+The extension resolves credentials through Pi’s public APIs. It does not read credential stores, `.env` files, or browsers itself. Quota results stay in memory, isolated by credential fingerprint so switching accounts cannot show a previous account’s data. Errors use sanitized categories; raw response bodies, tokens, and account identifiers are not displayed.
+
+Like any Pi extension, this package runs with full system access. [Review the source](https://github.com/singh-gur/pi-usage) before installing. Independently implemented; not affiliated with the providers listed above.
 
 ## Development
 
-```
-pnpm install --frozen-lockfile
-pnpm test            # node --test, synthetic payloads only
-pnpm run typecheck   # tsc --noEmit
-pnpm run pack:check  # pnpm pack --dry-run
+From a checkout, after installing dependencies:
+
+```bash
+pi -e ./src/index.ts
 ```
 
-No live endpoints or credentials are used by the test suite.
+```bash
+pnpm install --frozen-lockfile
+pnpm test
+pnpm run typecheck
+pnpm run pack:check
+```
+
+Tests use synthetic payloads and mocked Pi/fetch APIs—no live authenticated quota calls or paid model requests.
+
+Found a mismatch? [Open an issue](https://github.com/singh-gur/pi-usage/issues) with the provider, package/Pi versions, and a **sanitized** description. Never include credentials, tokens, or raw account payloads.
+
+[MIT license](https://github.com/singh-gur/pi-usage/blob/main/LICENSE)
