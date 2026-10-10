@@ -32,6 +32,7 @@
     "zai",
     "grok",
     "github-copilot",
+    "anthropic",
     "openrouter"
   ],
   "files": [

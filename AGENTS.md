@@ -7,7 +7,7 @@ Repo-scoped rules for agents working in `pi-usage`. The global rules in
 
 `pi-usage` is an independently implemented, read-only Pi extension package
 that reports provider subscription quota (Codex, OpenCode Go, Z.ai, Kimi,
-Grok, GitHub Copilot) and OpenRouter key allowance through a `/usage` command
+Grok, GitHub Copilot, Anthropic) and OpenRouter key allowance through a `/usage` command
 and an additive footer indicator. Package settings are managed through
 `/usage-settings` and package-owned `pi-usage.json` files; project overrides
 must remain trust-gated.

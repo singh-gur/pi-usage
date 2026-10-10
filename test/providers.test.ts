@@ -5,6 +5,7 @@ import { interpretOpenRouter, openrouterAdapter } from "../src/providers/openrou
 import { codexAccountId, interpretCodex, codexAdapter } from "../src/providers/codex.ts";
 import { interpretKimi, kimiAdapter } from "../src/providers/kimi.ts";
 import { interpretZai, zaiAdapter } from "../src/providers/zai.ts";
+import { anthropicAdapter, interpretAnthropic } from "../src/providers/anthropic.ts";
 import { UsageError } from "../src/types.ts";
 
 const NOW = 1_700_000_000_000;
@@ -934,6 +935,153 @@ test("copilot: non-OAuth resolution is rejected without a request", async () => 
   };
   const error = await githubCopilotAdapter
     .fetchQuota({ apiKey: "ghp-api-key", oauth: false }, getJson)
+    .catch((e) => e);
+  assert.ok(error instanceof UsageError && error.kind === "auth");
+  assert.equal(requests, 0);
+});
+
+// ----------------------------------------------------------------- Anthropic
+
+function anthropicLegacy(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    five_hour: { utilization: 42, resets_at: ISO },
+    seven_day: { utilization: 5, resets_at: ISO },
+    ...overrides,
+  };
+}
+
+test("anthropic: legacy flat keys map utilization to consumed percent", () => {
+  const result = interpretAnthropic(200, anthropicLegacy(), NOW);
+  assert.equal(result.providerId, "anthropic");
+  assert.equal(result.domainLabel, "Claude subscription allowance");
+  assert.deepEqual(
+    result.windows.map((w) => w.label),
+    ["5-hour", "7-day"],
+  );
+  assert.equal(result.windows[0]!.usedPercent, 42);
+  assert.equal(result.windows[0]!.resetsAt, NOW + 3_600_000);
+  assert.equal(result.partialNotice, undefined);
+});
+
+test("anthropic: legacy Opus/Sonnet weekly keys stay separate", () => {
+  const result = interpretAnthropic(
+    200,
+    anthropicLegacy({ seven_day_opus: { utilization: 88, resets_at: ISO }, seven_day_sonnet: { utilization: 0 } }),
+    NOW,
+  );
+  assert.deepEqual(
+    result.windows.map((w) => w.label),
+    ["5-hour", "7-day", "7-day (Opus)", "7-day (Sonnet)"],
+  );
+  assert.equal(result.windows[3]!.usedPercent, 0);
+});
+
+test("anthropic: limits array is preferred and legacy keys are not duplicated", () => {
+  const result = interpretAnthropic(
+    200,
+    {
+      five_hour: { utilization: 42, resets_at: ISO },
+      seven_day: { utilization: 5, resets_at: ISO },
+      limits: [
+        { kind: "session", percent: 10, resets_at: ISO },
+        { kind: "weekly_all", percent: 20, resets_at: ISO },
+        { kind: "weekly_scoped", percent: 30, resets_at: ISO, scope: { model: { display_name: "Sonnet" } } },
+      ],
+    },
+    NOW,
+  );
+  assert.deepEqual(
+    result.windows.map((w) => w.label),
+    ["5-hour", "7-day", "7-day (Sonnet)"],
+  );
+  assert.equal(result.windows[0]!.usedPercent, 10);
+  assert.equal(result.partialNotice, undefined);
+});
+
+test("anthropic: unnamed scoped limit and unknown kinds never become a balance", () => {
+  const result = interpretAnthropic(
+    200,
+    { limits: [{ kind: "weekly_scoped", percent: 15 }, { kind: "weekly_something_new", percent: 99 }] },
+    NOW,
+  );
+  assert.deepEqual(result.windows.map((w) => w.label), ["7-day (scoped)"]);
+  assert.equal(result.windows[0]!.usedPercent, 15);
+});
+
+test("anthropic: present-but-invalid percent drops the window, never zero", () => {
+  const result = interpretAnthropic(
+    200,
+    {
+      five_hour: { utilization: "lots" },
+      seven_day: { utilization: 5, resets_at: ISO },
+      limits: [],
+    },
+    NOW,
+  );
+  assert.deepEqual(result.windows.map((w) => w.label), ["7-day"]);
+  assert.ok(result.partialNotice);
+});
+
+test("anthropic: out-of-range utilization stays unknown", () => {
+  expectError("unsupported", () => interpretAnthropic(200, { five_hour: { utilization: 150 } }, NOW));
+});
+
+test("anthropic: enabled extra-usage spend is a separate USD window", () => {
+  const result = interpretAnthropic(
+    200,
+    {
+      ...anthropicLegacy(),
+      spend: { enabled: true, percent: 25, used: { amount_minor: 1234, exponent: 2, currency: "USD" } },
+    },
+    NOW,
+  );
+  const spend = result.windows[2]!;
+  assert.equal(spend.label, "extra usage spend");
+  assert.deepEqual(spend.used, { value: 12.34, unit: "USD" });
+  assert.equal(spend.usedPercent, 25);
+});
+
+test("anthropic: disabled or unusable spend adds no window", () => {
+  const base = anthropicLegacy();
+  const disabled = interpretAnthropic(200, { ...base, spend: { enabled: false, percent: 25 } }, NOW);
+  assert.equal(disabled.windows.length, 2);
+  const broken = interpretAnthropic(200, { ...base, spend: { enabled: true } }, NOW);
+  assert.equal(broken.windows.length, 2);
+});
+
+test("anthropic: no usable windows is unsupported", () => {
+  expectError("unsupported", () => interpretAnthropic(200, {}, NOW));
+  expectError("unsupported", () => interpretAnthropic(200, null, NOW));
+  expectError("unsupported", () => interpretAnthropic(200, { limits: [{ kind: "mystery" }] }, NOW));
+});
+
+test("anthropic: auth and request status mapping", () => {
+  expectError("auth", () => interpretAnthropic(401, null, NOW));
+  expectError("auth", () => interpretAnthropic(403, null, NOW));
+  expectError("request", () => interpretAnthropic(500, null, NOW));
+});
+
+test("anthropic: adapter sends bearer auth with the OAuth beta header", async () => {
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const getJson = async (url: string, headers: Record<string, string>) => {
+    calls.push({ url, headers });
+    return { status: 200, data: anthropicLegacy() };
+  };
+  const result = await anthropicAdapter.fetchQuota({ apiKey: "sk-ant-oauth", oauth: true }, getJson);
+  assert.equal(calls[0]!.url, "https://api.anthropic.com/api/oauth/usage");
+  assert.equal(calls[0]!.headers.authorization, "Bearer sk-ant-oauth");
+  assert.equal(calls[0]!.headers["anthropic-beta"], "oauth-2025-04-20");
+  assert.equal(result.providerId, "anthropic");
+});
+
+test("anthropic: non-OAuth resolution is rejected without a request", async () => {
+  let requests = 0;
+  const getJson = async () => {
+    requests++;
+    return { status: 200, data: anthropicLegacy() };
+  };
+  const error = await anthropicAdapter
+    .fetchQuota({ apiKey: "sk-ant-api-key", oauth: false }, getJson)
     .catch((e) => e);
   assert.ok(error instanceof UsageError && error.kind === "auth");
   assert.equal(requests, 0);

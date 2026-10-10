@@ -531,7 +531,7 @@ const CODEX_JWT = `${Buffer.from(JSON.stringify({ alg: "RS256" })).toString("bas
   JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-9" } }),
 ).toString("base64url")}.sig`;
 
-const SEVEN_PROVIDER_BODIES = {
+const EIGHT_PROVIDER_BODIES = {
   "opencode.ai": () => new Response(GO_BODY, { status: 200 }),
   "openrouter.ai": () => new Response(OR_BODY, { status: 200 }),
   "chatgpt.com": () =>
@@ -589,6 +589,14 @@ const SEVEN_PROVIDER_BODIES = {
       }),
       { status: 200 },
     ),
+  "api.anthropic.com": () =>
+    new Response(
+      JSON.stringify({
+        five_hour: { utilization: 42, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
+        seven_day: { utilization: 5, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+      }),
+      { status: 200 },
+    ),
 };
 
 const ALL_CONFIGURED = {
@@ -599,11 +607,12 @@ const ALL_CONFIGURED = {
   zai: true,
   xai: true,
   "github-copilot": true,
+  anthropic: true,
 };
 
-test("extension: seven providers render independently without conflation", async () => {
+test("extension: eight providers render independently without conflation", async () => {
   const harness = setupExtension();
-  installFetch(SEVEN_PROVIDER_BODIES, harness.fetchCalls);
+  installFetch(EIGHT_PROVIDER_BODIES, harness.fetchCalls);
   const { ctx, handles } = makeCtx({
     mode: "tui",
     configured: ALL_CONFIGURED,
@@ -615,8 +624,9 @@ test("extension: seven providers render independently without conflation", async
       zai: "k",
       xai: "grok-oauth-token",
       "github-copilot": "ghu-session-token",
+      anthropic: "sk-ant-oauth",
     },
-    oauthByKey: { "openai-codex": true, xai: true, "github-copilot": true },
+    oauthByKey: { "openai-codex": true, xai: true, "github-copilot": true, anthropic: true },
     authBaseUrl: { "github-copilot": "https://api.business.githubcopilot.com" },
   });
 
@@ -656,6 +666,12 @@ test("extension: seven providers render independently without conflation", async
   assert.ok(lines.includes("AI-credit allowance"));
   assert.ok(/66.5% left/.test(lines));
 
+  handles[0]!.component.handleInput("\x1b[C"); // Anthropic
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(lines.includes("[Anthropic]"));
+  assert.ok(lines.includes("Claude subscription allowance"));
+  assert.ok(/5-hour/.test(lines) && /58% left/.test(lines));
+
   // Grok: identity ran before billing and carried the verified user id.
   const grokCalls = harness.fetchCalls.filter((c) => c.url.includes("cli-chat-proxy.grok.com"));
   assert.ok(grokCalls.length >= 2);
@@ -679,6 +695,12 @@ test("extension: seven providers render independently without conflation", async
   assert.equal(copilotCall!.headers["copilot-integration-id"], "vscode-chat");
   assert.equal(copilotCall!.headers["user-agent"], "GitHubCopilotChat/0.35.0");
   assert.equal(copilotCall!.headers["editor-version"], "vscode/1.107.0");
+
+  // Anthropic request used the OAuth usage endpoint with the beta header.
+  const anthropicCall = harness.fetchCalls.find((c) => c.url === "https://api.anthropic.com/api/oauth/usage");
+  assert.ok(anthropicCall, "anthropic quota request issued");
+  assert.equal(anthropicCall!.headers.authorization, "Bearer sk-ant-oauth");
+  assert.equal(anthropicCall!.headers["anthropic-beta"], "oauth-2025-04-20");
 
   handles[0]!.done(undefined);
   await handlerPromise;
@@ -996,7 +1018,7 @@ test("extension: session_start refreshes the active provider and sets an additiv
 
 test("extension: model_select switches the footer to the new active provider", async () => {
   const harness = setupExtension();
-  installFetch(SEVEN_PROVIDER_BODIES, harness.fetchCalls);
+  installFetch(EIGHT_PROVIDER_BODIES, harness.fetchCalls);
   const { ctx, statusCalls } = makeCtx({
     mode: "tui",
     configured: { "opencode-go": true, xai: true },
