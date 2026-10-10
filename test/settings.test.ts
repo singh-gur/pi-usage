@@ -19,11 +19,13 @@ test("settings: defaults and project overrides merge without mutation", () => {
     footerFormat: "compact",
     pollIntervalMinutes: 15,
     refreshAfterTurn: false,
+    showSessionBar: true,
   });
   assert.deepEqual(DEFAULT_USAGE_SETTINGS, {
     footerFormat: "full",
     pollIntervalMinutes: 5,
     refreshAfterTurn: true,
+    showSessionBar: true,
   });
 });
 
@@ -40,6 +42,10 @@ test("settings: parser keeps valid fields and warns about invalid or unknown fie
   assert.ok(parsed.warnings.some((warning) => warning.includes("refreshAfterTurn")));
   assert.ok(parsed.warnings.some((warning) => warning.includes("futureSetting")));
 
+  assert.deepEqual(parseUsageSettings({ showSessionBar: false }, "global"), {
+    settings: { showSessionBar: false }, warnings: [],
+  });
+  assert.match(parseUsageSettings({ showSessionBar: "false" }, "project").warnings[0]!, /showSessionBar/);
   const root = parseUsageSettings([], "project");
   assert.deepEqual(root.settings, {});
   assert.match(root.warnings[0]!, /expected a JSON object/);
@@ -52,13 +58,14 @@ test("settings: global and trusted project files load with project precedence", 
   const paths = usageSettingsPaths(cwd, agentDir);
   try {
     await saveUsageSettings(paths.global, { footerFormat: "compact", pollIntervalMinutes: 15 });
-    await saveUsageSettings(paths.project, { pollIntervalMinutes: 0, refreshAfterTurn: false });
+    await saveUsageSettings(paths.project, { pollIntervalMinutes: 0, refreshAfterTurn: false, showSessionBar: false });
 
     const trusted = await loadUsageSettings(cwd, true, agentDir);
     assert.deepEqual(trusted.settings, {
       footerFormat: "compact",
       pollIntervalMinutes: 0,
       refreshAfterTurn: false,
+      showSessionBar: false,
     });
     assert.deepEqual(trusted.warnings, []);
 
@@ -67,6 +74,7 @@ test("settings: global and trusted project files load with project precedence", 
       footerFormat: "compact",
       pollIntervalMinutes: 15,
       refreshAfterTurn: true,
+      showSessionBar: true,
     });
     assert.deepEqual(untrusted.project, {});
   } finally {

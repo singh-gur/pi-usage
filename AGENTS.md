@@ -12,6 +12,23 @@ and an additive footer indicator. Package settings are managed through
 `/usage-settings` and package-owned `pi-usage.json` files; project overrides
 must remain trust-gated.
 
+`/usage` has a separate **Current session** tab with active-branch horizontal
+bars by provider/model and input, output, cache read, and cache write. Provider
+tabs remain quota-only. The shared additive `usage` status combines quota text
+with only the cache-read percentage across all providers: cache-read tokens
+as a share of all recorded session tokens, matching the session legend (not
+an input-only cache-hit rate). Empty sessions show `cache read —`.
+`showSessionBar` (default true) is retained as the visibility setting name for
+compatibility; `/usage-settings` labels it **Cache read percentage**. It is
+independent of `footerFormat`, which controls quota text and automatic quota
+networking. Rebuild from Pi's public
+`sessionManager.getBranch()` on lifecycle boundaries, never credential files
+or provider requests. Include Pi v1's attributed `usage` entries (such as
+cache warming), regardless of operation kind. Unattributed tool/summary usage
+appears as "Other usage" inside Current session. Missing counts are partial,
+not verified zeros; reasoning is already included in output. Very small shares
+can round out of bars; exact counts remain in the session legends.
+
 GitHub Copilot (`github-copilot`) reports the main allowance only,
 percentage-based, from the undocumented `api.github.com/copilot_internal/user`
 endpoint using the Pi-resolved OAuth session token. Its account-specific
@@ -21,7 +38,9 @@ for that account class. Custom enterprise hosts, token exchanges, and
 credential fallbacks are out of scope; if the token is rejected, stop and
 record the blocker instead of widening auth access.
 
-Do not widen compatibility claims beyond the inspected Pi 0.85.1 API.
+Target Pi v1 with `^1.1.0` peer/dev dependency ranges. Compatibility is
+inspected and synthetically tested against Pi 1.1.0; do not imply live provider
+verification or independently verified support for other releases.
 
 README screenshots live in `assets/screenshots/` and depict real UI output
 with synthetic data, not live account verification. The README and `pi.image`
@@ -37,6 +56,11 @@ decisions live in `pnpm-workspace.yaml`):
 - `pnpm test` — `node --test test/*.test.ts`, synthetic data only.
 - `pnpm run typecheck` — `tsc --noEmit`, no emitted runtime files.
 - `pnpm run pack:check` — `pnpm pack --dry-run`; intended files only.
+- `PI_OFFLINE=1 pnpm exec pi --no-extensions -e ./examples/session-preview.ts` —
+  synthetic UI preview; open `/usage-demo`, no paid requests or quota calls.
+- `pnpm exec pi --no-extensions -e ./src/index.ts --resume` — try the working tree
+  against a locally selected session, without installing or loading the
+  published copy. Use `PI_OFFLINE=1` to suppress quota networking.
 
 Add/remove dependencies only through pnpm, never by editing `package.json`
 or the lockfile directly. Use TypeScript strictness without a runtime build

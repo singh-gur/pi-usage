@@ -24,7 +24,7 @@ Start Pi, or run `/reload` in an existing session. If your supported providers a
 
 Otherwise, run `/login` in Pi to configure a supported provider first. **Codex, Grok, and GitHub Copilot require subscription OAuth credentials**, not plain API keys. The extension uses the credentials Pi resolves—there is no second credential setup.
 
-Requires **Node.js ≥ 24.16**. Built against the **Pi 0.85.1 public API**; compatibility with other versions has not been independently verified.
+Requires **Node.js ≥ 24.16** and **Pi ≥ 1.1.0 within v1**. Built and tested against the **Pi 1.1.0 public API** using synthetic data; other v1 releases have not been independently verified.
 
 <details>
 <summary>Try without a permanent install, install from Git, or update</summary>
@@ -54,7 +54,8 @@ To pin a release, append `@<version>` to the npm package spec. Pinned versions a
 ## One command. A clearer picture.
 
 - **See your headroom.** Remaining percentages or amounts, quota bars, and reset timing where the provider reports them.
-- **Check multiple providers.** A tab for each configured supported provider; shared and model-specific windows stay separate.
+- **Check multiple providers.** Quota tabs for configured supported providers; shared and model-specific windows stay separate.
+- **Understand this session.** A separate **Current session** tab shows token categories and provider/model shares using horizontal bars, counts, and percentages.
 - **Stay in flow.** An automatic, active-provider footer indicator adds to Pi’s existing status area instead of replacing it.
 - **Know when data needs attention.** Partial results, stale data, and errors are labelled—not disguised as a healthy balance. One provider’s failure does not hide the others.
 - **No model calls to check usage.** Quota lookups are read-only requests to provider endpoints, not prompts or inference requests.
@@ -81,6 +82,14 @@ The footer follows your active provider and shows its **primary quota window**. 
 
 The status light reflects remaining headroom: green above 40%, yellow at 40% or less, red at 15% or less, and neutral when no ratio is available. Open `/usage` for secondary windows and the full picture.
 
+### Current session token usage
+
+**Current session** summarizes recorded usage on the active conversation branch, across all providers—not just those with quota adapters. It includes input, output, cache read, and cache write; reasoning tokens are already part of output. Pi-attributed operations such as cache warming also count. Tool/summary usage without provider/model attribution is shown as **Other usage**, not assigned to a guessed provider.
+
+The footer shows only the session's **cache-read percentage**, for example `cache read 61.5%`, beside provider usage. This is cache-read tokens divided by all recorded session tokens (including output and cache writes), matching the Current session legend—not an input-only cache-hit rate. Empty sessions show `cache read —`. The tab keeps its full breakdown and horizontal bars. This is recorded Pi usage, not account-wide billing or file read/write counts.
+
+Toggle **Cache read percentage** in `/usage-settings` independently of the provider footer format. The existing `showSessionBar` JSON key is retained for compatibility and now controls this percentage. Session summaries need no extra network calls and also work offline.
+
 ## Supported providers
 
 | Provider | What you can check |
@@ -93,7 +102,7 @@ The status light reflects remaining headroom: green above 40%, yellow at 40% or 
 | **GitHub Copilot** · `github-copilot` | Main allowance percentage for AI-credit or legacy premium-request billing. See the account-support caveat below. |
 | **OpenRouter** · `openrouter` | Current key spending cap, remaining dollars, and reported spending—not account-wide credit. |
 
-Only configured supported providers appear. One account per provider.
+Only configured supported providers get quota tabs. The Current session tab can include recorded model usage from any provider. Quota reporting uses one account per provider.
 
 ### Provider caveats worth knowing
 
@@ -108,11 +117,12 @@ Run `/usage-settings` to choose **Global** or **Project** settings. Changes appl
 
 | Setting | Options | Default |
 | --- | --- | --- |
-| Footer format | `full`, `compact`, `off` | `full` |
+| Provider footer format | `full`, `compact`, `off` | `full` |
+| Cache read percentage | On / off | On |
 | Poll interval | Off, 1, 5, 15, or 30 minutes | 5 minutes |
 | Refresh after turn | On / off | On |
 
-**Prefer manual checks only?** Set the footer to `off`. This removes the indicator and disables automatic quota networking; `/usage` still works. Setting only the poll interval to off stops the timer, not session, provider-switch, or enabled after-turn refreshes.
+**Prefer manual quota checks only?** Set the provider footer to `off`. This removes quota text and disables automatic quota networking; `/usage` still works. Turn **Cache read percentage** off separately to hide the session indicator too. Setting only the poll interval to off stops the timer, not session, provider-switch, or enabled after-turn refreshes.
 
 <details>
 <summary>Configuration files and refresh behavior</summary>
@@ -123,11 +133,12 @@ Settings live in `~/.pi/agent/pi-usage.json` globally and `<cwd>/.pi/pi-usage.js
 {
   "footerFormat": "full",
   "pollIntervalMinutes": 5,
-  "refreshAfterTurn": true
+  "refreshAfterTurn": true,
+  "showSessionBar": true
 }
 ```
 
-With the footer enabled:
+With the provider footer enabled:
 
 - Session start and a switch to a different provider refresh the active provider. Switching models within the same provider does not re-fetch.
 - After a settled turn, enabled refreshes run only when cached data is at least 60 seconds old or a reset time has passed.

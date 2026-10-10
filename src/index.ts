@@ -2,8 +2,8 @@
  * pi-usage extension entry point.
  *
  * Registers the /usage command (dismissible, scrollable view across all
- * configured supported providers) and the automatic active-provider footer
- * indicator. Background work starts from session lifecycle events only; it is
+ * configured quota providers and session token usage) and additive quota/token
+ * footer indicators. Background work starts from session lifecycle events only; it is
  * TUI-only, offline-aware, and fully cleared on session shutdown.
  */
 import { getSettingsListTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,7 +11,8 @@ import { Container, type SettingItem, SettingsList, Text } from "@earendil-works
 import type { AuthGateway } from "./auth.ts";
 import { UsageMonitor, type MonitorSession } from "./refresh.ts";
 import type { QuotaAdapter } from "./types.ts";
-import { UsageView, type UsageEntry } from "./ui.ts";
+import { UsageView, formatCacheReadPercent, type UsageEntry } from "./ui.ts";
+import { collectSessionUsage, sessionTokenTotals } from "./session-usage.ts";
 import {
   DEFAULT_USAGE_SETTINGS,
   loadUsageSettings,
@@ -76,9 +77,40 @@ function pollMinutes(value: string): PollIntervalMinutes {
 
 export default function (pi: ExtensionAPI) {
   const monitor = new UsageMonitor({ adapters: ADAPTERS });
+  let showCacheReadPercent = DEFAULT_USAGE_SETTINGS.showSessionBar;
+  let footerContext: ExtensionContext | undefined;
+  let quotaStatus: string | undefined;
+  let cacheReadStatus: string | undefined;
+  let footerGeneration = 0;
+  const renderStatus = (ctx: ExtensionContext) => {
+    if (ctx.mode !== "tui") return;
+    ctx.ui.setStatus("usage", [cacheReadStatus, quotaStatus].filter(Boolean).join(" · ") || undefined);
+  };
+  const updateTokenStatus = (ctx: ExtensionContext) => {
+    if (ctx.mode !== "tui") return;
+    footerContext = ctx;
+    cacheReadStatus = showCacheReadPercent
+      ? formatCacheReadPercent(sessionTokenTotals(collectSessionUsage(ctx.sessionManager.getBranch())))
+      : undefined;
+    renderStatus(ctx);
+  };
+  // Keep both indicators in the package's single additive status section.
+  const bindSession = (ctx: ExtensionContext): MonitorSession => {
+    const generation = ++footerGeneration;
+    return {
+      ...sessionFrom(ctx),
+      setStatus: (_key, text) => {
+        if (generation !== footerGeneration || !footerContext) return;
+        quotaStatus = text;
+        renderStatus(footerContext);
+      },
+    };
+  };
 
   const loadAndApplySettings = async (ctx: ExtensionContext): Promise<LoadedUsageSettings> => {
     const loaded = await loadUsageSettings(ctx.cwd, ctx.isProjectTrusted());
+    showCacheReadPercent = loaded.settings.showSessionBar;
+    updateTokenStatus(ctx);
     monitor.setSettings(loaded.settings);
     if (ctx.mode === "tui") {
       for (const warning of loaded.warnings) ctx.ui.notify(warning, "warning");
@@ -87,31 +119,29 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand("usage", {
-    description: "Show provider quota and allowance usage",
+    description: "Show provider quota and session token usage",
     handler: async (_args, ctx) => {
       // Custom TUI view only; print/JSON/RPC modes stay silent.
       if (ctx.mode !== "tui") return;
 
-      const session = sessionFrom(ctx);
+      const session = bindSession(ctx);
       // Bind on demand if lifecycle events were missed; otherwise keep refs fresh.
       if (!monitor.hasSession) {
         await loadAndApplySettings(ctx);
         monitor.startSession(session, ctx.model?.provider);
       } else monitor.updateSession(session);
 
+      updateTokenStatus(ctx);
+      const sessionUsage = collectSessionUsage(ctx.sessionManager.getBranch());
       const adapters = ADAPTERS.filter((adapter) => session.gateway.isConfigured(adapter.id));
-      if (adapters.length === 0) {
-        ctx.ui.notify("No supported providers are configured in Pi", "info");
-        return;
-      }
-
       // Prefill with cached data (verified against current credentials);
       // the refresh below bypasses cache age but respects backoff.
       const entries: UsageEntry[] = adapters.map((adapter) => ({ name: adapter.name }));
+      entries.push({ name: "Current session", sessionUsage });
       await Promise.all(
         adapters.map(async (adapter, index) => {
           const cached = await monitor.serveCached(adapter.id);
-          if (cached !== undefined) entries[index] = { name: adapter.name, usage: cached };
+          if (cached !== undefined) entries[index]!.usage = cached;
         }),
       );
       let requestRender: (() => void) | undefined = () => {};
@@ -159,8 +189,8 @@ export default function (pi: ExtensionAPI) {
       const items: SettingItem[] = [
         {
           id: "footerFormat",
-          label: "Footer format",
-          description: project ? `inherit uses global value: ${inherited.footerFormat}` : "Full, compact, or disabled",
+          label: "Provider footer format",
+          description: project ? `inherit uses global value: ${inherited.footerFormat}` : "Provider quota detail; the cache-read percentage is separate",
           currentValue: project && file.footerFormat === undefined ? "inherit" : (file.footerFormat ?? DEFAULT_USAGE_SETTINGS.footerFormat),
           values: project ? ["inherit", "full", "compact", "off"] : ["full", "compact", "off"],
         },
@@ -174,6 +204,15 @@ export default function (pi: ExtensionAPI) {
           values: project
             ? ["inherit", "off", "1 min", "5 min", "15 min", "30 min"]
             : ["off", "1 min", "5 min", "15 min", "30 min"],
+        },
+        {
+          id: "showSessionBar",
+          label: "Cache read percentage",
+          description: project ? `inherit uses global value: ${inherited.showSessionBar ? "on" : "off"}` : "Show cache-read tokens as a percentage of all session tokens",
+          currentValue: project && file.showSessionBar === undefined
+            ? "inherit"
+            : (file.showSessionBar ?? DEFAULT_USAGE_SETTINGS.showSessionBar) ? "on" : "off",
+          values: project ? ["inherit", "on", "off"] : ["on", "off"],
         },
         {
           id: "refreshAfterTurn",
@@ -203,10 +242,15 @@ export default function (pi: ExtensionAPI) {
               file.pollIntervalMinutes = pollMinutes(value);
             } else if (id === "refreshAfterTurn") {
               file.refreshAfterTurn = value === "on";
+            } else if (id === "showSessionBar") {
+              file.showSessionBar = value === "on";
             }
-            monitor.setSettings(project
+            const settings = project
               ? mergeUsageSettings(loaded.global, file)
-              : mergeUsageSettings(file, loaded.project));
+              : mergeUsageSettings(file, loaded.project);
+            showCacheReadPercent = settings.showSessionBar;
+            updateTokenStatus(ctx);
+            monitor.setSettings(settings);
           },
           () => done(undefined),
         );
@@ -227,6 +271,8 @@ export default function (pi: ExtensionAPI) {
         await saveUsageSettings(path, file);
         ctx.ui.notify(`Saved ${scope.toLowerCase()} pi-usage settings`, "info");
       } catch {
+        showCacheReadPercent = loaded.settings.showSessionBar;
+        updateTokenStatus(ctx);
         monitor.setSettings(loaded.settings);
         ctx.ui.notify("Could not save pi-usage settings; changes were reverted", "error");
       }
@@ -237,20 +283,33 @@ export default function (pi: ExtensionAPI) {
   // on session_shutdown (quit/reload/new/resume/fork all fire shutdown first).
   pi.on("session_start", async (_event, ctx) => {
     await loadAndApplySettings(ctx);
-    monitor.startSession(sessionFrom(ctx as never), (ctx as { model?: { provider?: string } }).model?.provider);
+    monitor.startSession(bindSession(ctx), ctx.model?.provider);
   });
 
   pi.on("model_select", async (event, ctx) => {
-    monitor.updateSession(sessionFrom(ctx as never));
+    monitor.updateSession(bindSession(ctx));
     monitor.setActiveProvider(event.model.provider);
+    updateTokenStatus(ctx);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    monitor.updateSession(sessionFrom(ctx as never));
+    monitor.updateSession(bindSession(ctx));
     monitor.onAgentSettled();
+    updateTokenStatus(ctx);
   });
 
+  // turn_end runs after persistence; message_end runs before it in Pi 1.1.0.
+  pi.on("turn_end", async (_event, ctx) => updateTokenStatus(ctx));
+  pi.on("session_tree", async (_event, ctx) => updateTokenStatus(ctx));
+  pi.on("session_compact", async (_event, ctx) => updateTokenStatus(ctx));
+
   pi.on("session_shutdown", async () => {
+    const ctx = footerContext;
+    footerGeneration++;
+    cacheReadStatus = undefined;
+    quotaStatus = undefined;
+    footerContext = undefined;
     monitor.shutdown();
+    ctx?.ui.setStatus("usage", undefined);
   });
 }

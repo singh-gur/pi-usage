@@ -1,12 +1,14 @@
 /**
  * Dismissible, scrollable /usage view and pure line rendering.
  *
- * The UI consumes only the normalized ProviderUsage contract; no
- * provider-specific parsing happens here. Color is always paired with text.
+ * The UI consumes normalized quota and session token snapshots; no
+ * provider-specific parsing happens here. Session chart legends pair colors
+ * with exact counts and percentages.
  */
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { FooterFormat } from "./settings.ts";
 import type { ProviderUsage, QuotaWindow } from "./types.ts";
+import { TOKEN_CATEGORIES, totalTokens, sessionTokenTotals, segmentWidths, type TokenTotals, type SessionProviderUsage } from "./session-usage.ts";
 
 /** Structural theme slice; the real Pi theme satisfies this. */
 export interface ThemeLike {
@@ -18,6 +20,8 @@ export interface UsageEntry {
   name: string;
   /** Undefined while the provider refresh is still in flight. */
   usage?: ProviderUsage;
+  /** Present only on the Current session tab, including an empty session. */
+  sessionUsage?: SessionProviderUsage[];
 }
 
 function formatNumber(value: number): string {
@@ -147,6 +151,7 @@ const ERROR_COLOR: Record<string, string> = {
 
 function providerLines(entry: UsageEntry, theme: ThemeLike, width: number, showName = true): string[] {
   const lines = showName ? [theme.fg("accent", theme.bold(entry.name))] : [];
+  if (entry.sessionUsage) return [...lines, ...sessionUsageLines(entry.sessionUsage, theme, width)];
   const usage = entry.usage;
   if (!usage) return [...lines, theme.fg("dim", "  refreshing…")];
 
@@ -159,6 +164,66 @@ function providerLines(entry: UsageEntry, theme: ThemeLike, width: number, showN
   for (const window of usage.windows) lines.push(...windowLines(window, theme, width));
   if (usage.partialNotice) lines.push(theme.fg("warning", `  partial data: ${usage.partialNotice}`));
   return lines;
+}
+
+/** Session-derived names are data, never terminal control sequences. */
+function safeUsageLabel(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
+function tokenSummary(value: number, total: number): string {
+  return `${value.toLocaleString("en-US")} (${formatPercent(total > 0 ? value / total * 100 : 0)})`;
+}
+
+function sessionUsageLines(providers: SessionProviderUsage[], theme: ThemeLike, width: number): string[] {
+  const tokens = sessionTokenTotals(providers);
+  const total = totalTokens(tokens);
+  const barWidth = Math.max(1, Math.min(42, width - 2));
+  const lines = [theme.bold(`  Session tokens (active branch): ${total.toLocaleString("en-US")}`)];
+  if (total === 0) lines.push(theme.fg("dim", "  No recorded session tokens yet"));
+  if (providers.some((usage) => usage.incomplete)) {
+    lines.push(theme.fg("warning", "  Partial usage: some token counts were not recorded"));
+  }
+  lines.push("", "  By token category", `  ${formatSessionTokenBar(tokens, theme, barWidth)}`);
+  for (const { key, label, color } of TOKEN_CATEGORIES) {
+    lines.push(`  ${theme.fg(color, "■")} ${label}: ${tokenSummary(tokens[key], total)}`);
+  }
+  const shares = (title: string, items: Array<{ label: string; value: number }>) => {
+    lines.push("", `  ${title}`);
+    for (const item of items.sort((a, b) => b.value - a.value)) {
+      const filled = segmentWidths([item.value, Math.max(0, total - item.value)], barWidth)[0]!;
+      const label = `  ${safeUsageLabel(item.label)}`;
+      const summary = tokenSummary(item.value, total);
+      if (visibleWidth(`${label}: ${summary}`) <= width) lines.push(`${label}: ${summary}`);
+      else lines.push(label, `  ${summary}`);
+      lines.push(`  ${theme.fg("accent", "█".repeat(filled))}${theme.fg("dim", "░".repeat(barWidth - filled))}`);
+    }
+  };
+  shares("By provider", providers.map((usage) => ({
+    label: usage.providerId ?? "Other usage", value: totalTokens(usage.tokens),
+  })));
+  shares("By model", providers.flatMap((usage) => [...usage.models].map(([model, counts]) => ({
+    label: `${usage.providerId ?? "Other usage"} / ${model}`,
+    value: totalTokens(counts),
+  }))));
+  if (providers.some((usage) => usage.providerId === undefined)) {
+    lines.push(theme.fg("dim", "  Tool/summary usage: provider and model not recorded"));
+  }
+  lines.push("", theme.fg("dim", "  Input/output are tokens, not file reads/writes. Provider-reported counts."));
+  return lines;
+}
+
+/** Color-only horizontal bar; empty sessions keep the same width with neutral filler. */
+export function formatSessionTokenBar(tokens: TokenTotals, theme: ThemeLike, width = 20): string {
+  if (totalTokens(tokens) === 0) return theme.fg("dim", "░".repeat(width));
+  const widths = segmentWidths(TOKEN_CATEGORIES.map(({ key }) => tokens[key]), width);
+  return TOKEN_CATEGORIES.map(({ color }, index) => theme.fg(color, "█".repeat(widths[index]!))).join("");
+}
+
+/** Cache-read share of all recorded session tokens, matching the session legend. */
+export function formatCacheReadPercent(tokens: TokenTotals): string {
+  const total = totalTokens(tokens);
+  return total === 0 ? "cache read —" : `cache read ${formatPercent(tokens.cacheRead / total * 100)}`;
 }
 
 /** Pure rendering of the whole view body (without scroll chrome). */
@@ -186,7 +251,7 @@ function remainingValue(window: QuotaWindow): string | undefined {
 
 /**
  * Leading status light by headroom so approaching exhaustion is visible at a
- * glance (emoji glyphs render natively in the footer; ANSI codes do not):
+ * glance (status glyphs render natively in the footer):
  * 🟢 >40% left, 🟡 ≤40%, 🔴 ≤15%, ⚪ when no ratio is derivable.
  */
 function statusLight(window: QuotaWindow): string {

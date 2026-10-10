@@ -9,6 +9,8 @@ export interface UsageSettings {
   footerFormat: FooterFormat;
   pollIntervalMinutes: PollIntervalMinutes;
   refreshAfterTurn: boolean;
+  /** Retained setting name; now controls the cache-read percentage in the footer. */
+  showSessionBar: boolean;
 }
 
 export type UsageSettingsFile = Partial<UsageSettings>;
@@ -17,13 +19,14 @@ export const DEFAULT_USAGE_SETTINGS: Readonly<UsageSettings> = {
   footerFormat: "full",
   pollIntervalMinutes: 5,
   refreshAfterTurn: true,
+  showSessionBar: true,
 };
 
 export const SETTINGS_FILENAME = "pi-usage.json";
 const MAX_SETTINGS_BYTES = 64 * 1024;
 const FOOTER_FORMATS = new Set<FooterFormat>(["full", "compact", "off"]);
 const POLL_INTERVALS = new Set<PollIntervalMinutes>([0, 1, 5, 15, 30]);
-const KNOWN_KEYS = new Set<keyof UsageSettings>(["footerFormat", "pollIntervalMinutes", "refreshAfterTurn"]);
+const KNOWN_KEYS = new Set<keyof UsageSettings>(["footerFormat", "pollIntervalMinutes", "refreshAfterTurn", "showSessionBar"]);
 
 export interface UsageSettingsPaths {
   global: string;
@@ -78,6 +81,10 @@ export function parseUsageSettings(value: unknown, scope: "global" | "project"):
   if (input.refreshAfterTurn !== undefined) {
     if (typeof input.refreshAfterTurn === "boolean") settings.refreshAfterTurn = input.refreshAfterTurn;
     else warnings.push(`Ignoring invalid ${scope} setting "refreshAfterTurn"`);
+  }
+  if (input.showSessionBar !== undefined) {
+    if (typeof input.showSessionBar === "boolean") settings.showSessionBar = input.showSessionBar;
+    else warnings.push(`Ignoring invalid ${scope} setting "showSessionBar"`);
   }
   return { settings, warnings };
 }

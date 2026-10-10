@@ -1,15 +1,29 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import factory from "../src/index.ts";
 import { UsageView, renderUsageLines, formatFooterText, formatFooterError, type UsageEntry } from "../src/ui.ts";
 import type { ProviderUsage } from "../src/types.ts";
+import { syntheticSessionEntries } from "../examples/session-preview.ts";
+import { collectSessionUsage, sessionTokenTotals } from "../src/session-usage.ts";
+import { formatCacheReadPercent } from "../src/ui.ts";
+import { saveUsageSettings } from "../src/settings.ts";
 
 initTheme("dark");
+
+// Integration tests must not depend on personal or project usage settings.
+const testRoot = await mkdtemp(join(tmpdir(), "pi-usage-harness-"));
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = join(testRoot, "agent");
+after(async () => {
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  await rm(testRoot, { recursive: true, force: true });
+});
 
 // ------------------------------------------------------------- test doubles
 
@@ -57,6 +71,7 @@ function makeCtx(options: {
   cwd?: string;
   projectTrusted?: boolean;
   selections?: string[];
+  entries?: SessionEntry[];
 }) {
   const configured = options.configured ?? {};
   const authByKey = options.authByKey ?? {};
@@ -82,10 +97,11 @@ function makeCtx(options: {
   const selections = [...(options.selections ?? [])];
   const ctx = {
     mode: options.mode,
-    cwd: options.cwd ?? process.cwd(),
+    cwd: options.cwd ?? testRoot,
     hasUI: options.mode === "tui" || options.mode === "rpc",
     isProjectTrusted: () => options.projectTrusted ?? true,
     model: options.activeProvider !== undefined ? { provider: options.activeProvider, id: "test-model" } : undefined,
+    sessionManager: { getBranch: () => options.entries ?? [] },
     modelRegistry: {
       getProviderAuthStatus: (id: string) => ({ configured: configured[id] ?? false }),
       getProviderAuth: async (id: string) =>
@@ -98,6 +114,7 @@ function makeCtx(options: {
       getProvider: (id: string) => (options.providerBaseUrl?.[id] ? { baseUrl: options.providerBaseUrl[id] } : {}),
     },
     ui: {
+      theme: IDENTITY_THEME,
       custom,
       select: async () => selections.shift(),
       notify: (message: string, level: string) => notifications.push({ message, level }),
@@ -274,7 +291,7 @@ test("extension: unconfigured providers are omitted from the view entirely", asy
   await handlerPromise;
 });
 
-test("extension: nothing configured notifies instead of opening an empty view", async () => {
+test("extension: nothing configured still opens the empty Current session tab", async () => {
   const harness = setupExtension();
   let fetches = 0;
   globalThis.fetch = (async () => {
@@ -282,11 +299,16 @@ test("extension: nothing configured notifies instead of opening an empty view", 
     return new Response("{}");
   }) as typeof fetch;
   const { ctx, handles, notifications } = makeCtx({ mode: "tui", configured: {} });
-  await harness.commands.get("usage")!.handler("", ctx);
-  assert.equal(handles.length, 0, "no view opened");
+  const promise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  assert.equal(handles.length, 1);
+  assert.match(handles[0]!.component.render(100).join("\n"), /\[Current session\]/);
+  assert.match(handles[0]!.component.render(100).join("\n"), /No recorded session tokens yet/);
   assert.equal(fetches, 0);
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0]!.message, "No supported providers are configured in Pi");
+  assert.equal(notifications.length, 0);
+  handles[0]!.done(undefined);
+  await promise;
+  await harness.events.get("session_shutdown")!({}, ctx);
 });
 
 test("extension: PI_OFFLINE suppresses quota networking", async () => {
@@ -964,7 +986,7 @@ test("extension: session_start refreshes the active provider and sets an additiv
   await harness.events.get("session_start")!({}, ctx);
   await settle();
   assert.equal(harness.fetchCalls.length, 1, "only the active provider refreshed");
-  const footer = statusCalls.find((c) => c.text !== undefined);
+  const footer = statusCalls.find((c) => c.text?.includes("87.5%"));
   assert.ok(footer && /87\.5%/.test(footer.text!) && /left/.test(footer.text!), footer?.text ?? "no footer");
   for (const call of statusCalls) assert.equal(call.key, "usage", "additive status key only");
 
@@ -1025,4 +1047,175 @@ test("extension: agent_settled with fresh data does not re-fetch", async () => {
   await settle();
   assert.equal(harness.fetchCalls.length, 1, "fresh data is not re-fetched on settle");
   await harness.events.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("extension: cache-read percentage restores, updates after turns/tree changes, and clears on shutdown", async () => {
+  const harness = setupExtension();
+  const entries = syntheticSessionEntries();
+  const { ctx, statusCalls } = makeCtx({ mode: "tui", entries, activeProvider: "anthropic" });
+  await harness.events.get("session_start")!({}, ctx);
+  const lastBar = () => statusCalls.filter(({ key }) => key === "usage").at(-1)?.text;
+  const expected = () => formatCacheReadPercent(sessionTokenTotals(collectSessionUsage(entries)));
+  assert.equal(lastBar(), expected());
+  await harness.events.get("model_select")!({ model: { provider: "openai-codex" } }, ctx);
+  assert.equal(lastBar(), expected(), "switching models does not change all-provider scope");
+  entries.splice(1);
+  await harness.events.get("session_tree")!({}, ctx);
+  assert.equal(lastBar(), expected(), "active branch change is reflected");
+  entries.push(syntheticSessionEntries()[2]!);
+  await harness.events.get("turn_end")!({}, ctx);
+  assert.equal(lastBar(), expected(), "persisted turn usage is included");
+  await harness.events.get("agent_settled")!({}, ctx);
+  assert.equal(lastBar(), expected(), "settling cannot double-count");
+  await harness.events.get("session_shutdown")!({}, ctx);
+  assert.equal(lastBar(), undefined);
+  entries.splice(0);
+  await harness.events.get("session_start")!({}, ctx);
+  assert.equal(lastBar(), "cache read —", "new empty session has no manufactured ratio");
+  await harness.events.get("session_shutdown")!({}, ctx);
+});
+
+test("extension: local session charts work without configured quota adapters or networking", async () => {
+  const harness = setupExtension();
+  let fetches = 0;
+  globalThis.fetch = (async () => { fetches++; throw new Error("no networking expected"); }) as typeof fetch;
+  const { ctx, handles } = makeCtx({ mode: "tui", entries: syntheticSessionEntries() });
+  const promise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  assert.equal(handles.length, 1);
+  const text = handles[0]!.component.render(100).join("\n");
+  assert.match(text, /\[Current session\]/);
+  assert.match(text, /Session tokens/);
+  assert.match(text, /gpt-5\.4/);
+  assert.match(text, /claude-sonnet/);
+  assert.equal(fetches, 0);
+  handles[0]!.done(undefined);
+  await promise;
+  await harness.events.get("session_shutdown")!({}, ctx);
+});
+
+test("extension: cached quota prefill preserves session charts", async () => {
+  const harness = setupExtension();
+  installFetch({ "chatgpt.com": () => new Response(JSON.stringify({
+    rate_limit: { primary_window: { used_percent: 10, reset_at: 2_000_000_000 } },
+  })) }, harness.fetchCalls);
+  const { ctx, handles } = makeCtx({ mode: "tui", entries: syntheticSessionEntries(),
+    configured: { "openai-codex": true }, authByKey: { "openai-codex": "synthetic-token" },
+    oauthByKey: { "openai-codex": true }, activeProvider: "openai-codex" });
+  await harness.events.get("session_start")!({}, ctx);
+  await settle();
+  const promise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  assert.doesNotMatch(handles[0]!.component.render(100).join("\n"), /Session tokens|gpt-5\.4/);
+  handles[0]!.component.handleInput("l");
+  assert.match(handles[0]!.component.render(100).join("\n"), /\[Current session\]/);
+  assert.match(handles[0]!.component.render(100).join("\n"), /gpt-5\.4/);
+  assert.doesNotMatch(handles[0]!.component.render(100).join("\n"), /updated just now|refreshing/);
+  handles[0]!.done(undefined);
+  await promise;
+  await harness.events.get("session_shutdown")!({}, ctx);
+});
+
+test("extension: existing visibility setting hides the cache-read percentage, non-tui modes remain silent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-bar-off-"));
+  try {
+    await saveUsageSettings(join(root, ".pi", "pi-usage.json"), { showSessionBar: false });
+    for (const mode of ["tui", "rpc", "json", "print"]) {
+      const harness = setupExtension();
+      const { ctx, statusCalls } = makeCtx({ mode, cwd: root, entries: syntheticSessionEntries() });
+      await harness.events.get("session_start")!({}, ctx);
+      await harness.events.get("turn_end")!({}, ctx);
+      await harness.events.get("agent_settled")!({}, ctx);
+      assert.ok(!statusCalls.some(({ key, text }) => key === "usage" && text !== undefined));
+      if (mode !== "tui") assert.equal(statusCalls.length, 0);
+      await harness.events.get("session_shutdown")!({}, ctx);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("extension: cache-read percentage shares the quota status key and hiding it leaves quota visible", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-combined-"));
+  try {
+    const harness = setupExtension();
+    installFetch({ "opencode.ai": () => new Response(GO_BODY) }, harness.fetchCalls);
+    const { ctx, statusCalls } = makeCtx({ mode: "tui", cwd: root, entries: syntheticSessionEntries(),
+      configured: { "opencode-go": true }, authByKey: { "opencode-go": "synthetic-key" }, activeProvider: "opencode-go" });
+    await harness.events.get("session_start")!({}, ctx);
+    await settle();
+    assert.match(statusCalls.at(-1)!.text!, /^cache read 61\.5% · .*87\.5% left/);
+    assert.doesNotMatch(statusCalls.at(-1)!.text!, /█|░/);
+    await harness.events.get("turn_end")!({}, ctx);
+    assert.match(statusCalls.at(-1)!.text!, /^cache read 61\.5% · .*87\.5% left/);
+    assert.ok(statusCalls.every(({ key }) => key === "usage"), "one shared additive section");
+    await harness.events.get("session_shutdown")!({}, ctx);
+    await saveUsageSettings(join(root, ".pi", "pi-usage.json"), { showSessionBar: false });
+    await harness.events.get("session_start")!({}, ctx);
+    await settle();
+    assert.match(statusCalls.at(-1)!.text!, /87\.5% left/);
+    assert.doesNotMatch(statusCalls.at(-1)!.text!, /cache read|█|░/);
+    await harness.events.get("session_shutdown")!({}, ctx);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("extension: late quota rendering cannot restore the combined status after shutdown", async () => {
+  const harness = setupExtension();
+  installFetch({ "opencode.ai": () => new Response(GO_BODY) }, harness.fetchCalls);
+  const { ctx, statusCalls } = makeCtx({ mode: "tui", entries: syntheticSessionEntries(),
+    configured: { "opencode-go": true }, authByKey: { "opencode-go": "synthetic-key" }, activeProvider: "opencode-go" });
+  await harness.events.get("session_start")!({}, ctx);
+  await settle();
+  const originalAuth = ctx.modelRegistry.getProviderAuth;
+  let release: (() => void) | undefined;
+  ctx.modelRegistry.getProviderAuth = async (id) => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    return originalAuth(id);
+  };
+  await harness.commands.get("usage-settings")!.handler("", ctx);
+  assert.ok(release, "cached quota rendering is waiting on mocked auth resolution");
+  await harness.events.get("session_shutdown")!({}, ctx);
+  release();
+  await settle();
+  assert.deepEqual(statusCalls.at(-1), { key: "usage", text: undefined });
+});
+
+test("extension: provider footer off leaves the independent cache-read percentage visible without networking", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-bar-only-"));
+  try {
+    await saveUsageSettings(join(root, ".pi", "pi-usage.json"), { footerFormat: "off" });
+    const harness = setupExtension();
+    let fetches = 0;
+    globalThis.fetch = (async () => { fetches++; throw new Error("no automatic quota request expected"); }) as typeof fetch;
+    const { ctx, statusCalls } = makeCtx({ mode: "tui", cwd: root, entries: syntheticSessionEntries(),
+      configured: { "opencode-go": true }, authByKey: { "opencode-go": "synthetic-key" }, activeProvider: "opencode-go" });
+    await harness.events.get("session_start")!({}, ctx);
+    await settle();
+    assert.equal(statusCalls.at(-1)!.text, "cache read 61.5%");
+    assert.equal(fetches, 0);
+    await harness.events.get("session_shutdown")!({}, ctx);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("extension: independent cache-read percentage setting hides and restores it immediately", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-bar-settings-"));
+  try {
+    const harness = setupExtension();
+    const { ctx, handles, statusCalls } = makeCtx({ mode: "tui", cwd: root,
+      entries: syntheticSessionEntries(), selections: ["Project"] });
+    const promise = harness.commands.get("usage-settings")!.handler("", ctx);
+    await settle();
+    const bar = () => statusCalls.filter(({ key }) => key === "usage").at(-1)?.text;
+    assert.equal(bar(), "cache read 61.5%");
+    assert.match(handles[0]!.component.render(100).join("\n"), /Cache read percentage/);
+    const component = handles[0]!.component;
+    component.handleInput("\x1b[B"); // poll interval
+    component.handleInput("\x1b[B"); // cache read percentage
+    component.handleInput("\r"); // inherit -> on
+    component.handleInput("\r"); // on -> off
+    assert.equal(bar(), undefined);
+    component.handleInput("\r"); // off -> inherit (on)
+    assert.equal(bar(), "cache read 61.5%");
+    component.handleInput("\x1b");
+    await promise;
+    await harness.events.get("session_shutdown")!({}, ctx);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
