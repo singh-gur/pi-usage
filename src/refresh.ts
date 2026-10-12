@@ -17,8 +17,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AuthGateway } from "./auth.ts";
 import { resolveQuotaAuth } from "./auth.ts";
-import { bounded, createGetJson, DEFAULT_HTTP_LIMITS, isOffline, type GetJson } from "./http.ts";
-import { UsageError, type ProviderError, type ProviderUsage, type QuotaAdapter } from "./types.ts";
+import { bounded, createGetJson, createPostJson, DEFAULT_HTTP_LIMITS, isOffline, type GetJson, type PostJson } from "./http.ts";
+import { attachResets, availableResetOffers, lowQuotaResetAvailable } from "./resets.ts";
+import { UsageError, type ProviderError, type ProviderUsage, type QuotaAdapter, type ResetOffer } from "./types.ts";
 import { DEFAULT_USAGE_SETTINGS, type UsageSettings } from "./settings.ts";
 import { formatFooterError, formatFooterText } from "./ui.ts";
 
@@ -48,6 +49,16 @@ export interface MonitorSession {
   gateway: AuthGateway;
   mode: string;
   setStatus(key: string, text: string | undefined): void;
+  /** False means temporarily suppressed by the command UI. */
+  notify?(message: string): boolean | void;
+}
+
+export interface ResetSelection {
+  providerId: string;
+  offers: ResetOffer[];
+  usage: ProviderUsage;
+  fingerprint: string;
+  generation: number;
 }
 
 export interface UsageMonitorOptions {
@@ -56,6 +67,7 @@ export interface UsageMonitorOptions {
   now?(): number;
   /** Injectable GET factory (tests); production uses the bounded HTTP layer. */
   createRequester?(signal: AbortSignal): GetJson;
+  createResetRequester?(signal: AbortSignal): PostJson;
   settings?: UsageSettings;
 }
 
@@ -85,6 +97,10 @@ export class UsageMonitor {
   private readonly now: () => number;
   private readonly createRequester: (signal: AbortSignal) => GetJson;
   private settings: UsageSettings;
+  private readonly createResetRequester: (signal: AbortSignal) => PostJson;
+  private readonly resetting = new Set<string>();
+  private readonly attemptedResets = new Set<string>();
+  private readonly resetNotices = new Set<string>();
   /** Per-process (per-extension-instance) salt for credential fingerprints. */
   private readonly salt = randomUUID();
 
@@ -106,6 +122,7 @@ export class UsageMonitor {
     this.now = options.now ?? (() => Date.now());
     this.createRequester = options.createRequester ?? ((signal) => createGetJson(DEFAULT_HTTP_LIMITS, signal));
     this.settings = options.settings ?? { ...DEFAULT_USAGE_SETTINGS };
+    this.createResetRequester = options.createResetRequester ?? ((signal) => createPostJson(DEFAULT_HTTP_LIMITS, signal));
   }
 
   get hasSession(): boolean {
@@ -197,6 +214,98 @@ export class UsageMonitor {
     return this.refresh(adapter.id, "command");
   }
 
+  /** Fresh account-bound selection, obtained only after the usage screen closes. */
+  async prepareReset(providerId: string): Promise<ResetSelection> {
+    const adapter = this.adapterById.get(providerId);
+    const session = this.session;
+    const generation = this.generation;
+    if (!adapter?.fetchResets || !adapter.redeemReset || !session || session.mode !== "tui" || isOffline()) {
+      throw new UsageError("unsupported", "Reset redemption is unavailable");
+    }
+    const usage = await this.refreshProvider(adapter);
+    if (usage.error || this.lastError.has(providerId) || this.backoff.has(providerId)) {
+      throw new UsageError("request", "Fresh quota is required before reset");
+    }
+    const auth = await bounded(resolveQuotaAuth(session.gateway, providerId, adapter.officialOrigin,
+      adapter.allowedProviderOrigin, adapter.allowedOAuthOrigins), PROVIDER_BOUND_MS);
+    if (auth instanceof UsageError) throw auth;
+    if (generation !== this.generation || isOffline()) throw new UsageError("canceled", "Session changed; reset canceled");
+    const fingerprint = this.fingerprintOf(auth.apiKey);
+    if (this.cache.get(providerId)?.fingerprint !== fingerprint) {
+      throw new UsageError("auth", "Account changed; reopen /usage");
+    }
+    const offers = availableResetOffers(usage.resets?.offers ?? [], this.now());
+    if (offers.length === 0) throw new UsageError("unsupported", "No redeemable reset is available");
+    return { providerId, offers, usage, fingerprint, generation };
+  }
+
+  /** One confirmed attempt; recheck account and inventory before any POST. Never retry. */
+  async redeemReset(selection: ResetSelection, offerId: string): Promise<string> {
+    const { providerId, fingerprint, generation } = selection;
+    const adapter = this.adapterById.get(providerId);
+    const session = this.session;
+    const check = () => {
+      if (isOffline() || generation !== this.generation || !session || session.mode !== "tui") {
+        throw new UsageError("canceled", "Session changed or offline; reset canceled");
+      }
+    };
+    check();
+    if (!adapter?.fetchResets || !adapter.redeemReset || !selection.offers.some((offer) => offer.id === offerId)) {
+      throw new UsageError("unsupported", "Reset redemption is unavailable");
+    }
+    if (this.resetting.has(providerId)) throw new UsageError("canceled", "Reset already in progress");
+    const attemptKey = `${providerId}:${fingerprint}:${offerId}`;
+    if (this.attemptedResets.has(attemptKey)) throw new UsageError("canceled", "Reset already attempted; verify its outcome with the provider");
+    this.resetting.add(providerId);
+    let posted = false;
+    try {
+      await this.inFlight.get(providerId);
+      check();
+      const auth = await bounded(resolveQuotaAuth(session!.gateway, providerId, adapter.officialOrigin,
+        adapter.allowedProviderOrigin, adapter.allowedOAuthOrigins), PROVIDER_BOUND_MS);
+      if (auth instanceof UsageError) throw auth;
+      check();
+      if (this.fingerprintOf(auth.apiKey) !== fingerprint) throw new UsageError("auth", "Account changed; reset canceled");
+      const signal = this.ensureController().signal;
+      const getJson = this.createRequester(signal);
+      const inventory = await bounded(adapter.fetchResets(auth, getJson), PROVIDER_BOUND_MS);
+      check();
+      const offer = availableResetOffers(inventory.offers, this.now()).find((item) => item.id === offerId);
+      if (!offer) throw new UsageError("unsupported", "Selected reset is no longer available");
+      const postJson: PostJson = async (url, headers, body) => {
+        check();
+        const current = await bounded(resolveQuotaAuth(session!.gateway, providerId, adapter.officialOrigin,
+          adapter.allowedProviderOrigin, adapter.allowedOAuthOrigins), PROVIDER_BOUND_MS);
+        check();
+        if (current instanceof UsageError || this.fingerprintOf(current.apiKey) !== fingerprint) {
+          throw new UsageError("auth", "Account changed; reset canceled");
+        }
+        if (offer.expiresAt !== undefined && offer.expiresAt <= this.now()) {
+          throw new UsageError("canceled", "Selected reset expired; reset canceled");
+        }
+        if (posted) throw new UsageError("canceled", "Duplicate reset request refused");
+        posted = true;
+        this.attemptedResets.add(attemptKey);
+        this.cache.delete(providerId);
+        return this.createResetRequester(signal)(url, headers, body);
+      };
+      const message = await adapter.redeemReset(auth, offer, getJson, postJson, randomUUID());
+      check();
+      return message;
+    } catch (error) {
+      if (posted) throw new UsageError("request", "Reset outcome may be unknown; check provider usage. No automatic retry was made");
+      throw error instanceof UsageError ? error : new UsageError("request", "Reset check failed");
+    } finally {
+      this.resetting.delete(providerId);
+      if (posted && this.generation === generation) {
+        this.cache.delete(providerId);
+        this.backoff.delete(providerId);
+        this.lastError.delete(providerId);
+        await this.refreshProvider(adapter);
+      }
+    }
+  }
+
   /** Clear timers, abort package-owned requests, discard late results, drop status. */
   shutdown(): void {
     this.stopSessionWork();
@@ -207,6 +316,7 @@ export class UsageMonitor {
 
   private stopSessionWork(): void {
     this.generation++;
+    this.resetNotices.clear();
     if (this.pollTimer !== undefined) {
       clearTimeout(this.pollTimer);
       this.pollTimer = undefined;
@@ -265,6 +375,10 @@ export class UsageMonitor {
   }
 
   private refresh(providerId: string, trigger: "session" | "model" | "settled" | "poll" | "command"): Promise<ProviderUsage> {
+    if (this.resetting.has(providerId)) {
+      const adapter = this.adapterById.get(providerId)!;
+      return Promise.resolve(errorUsage(adapter, new UsageError("canceled", "Reset in progress"), this.now()));
+    }
     // Deduplicate command, timer, and event requests for the same provider.
     const existing = this.inFlight.get(providerId);
     if (existing !== undefined) return existing;
@@ -333,11 +447,19 @@ export class UsageMonitor {
         return response;
       };
       try {
-        const usage = await adapter.fetchQuota(auth, getJson);
+        const usage = await attachResets(adapter, auth, getJson, await adapter.fetchQuota(auth, getJson));
         if (callerGaveUp || this.generation !== generation) return usage; // obsolete
         this.backoff.delete(adapterId);
         this.lastError.delete(adapterId);
         this.cache.set(adapterId, { fingerprint, usage });
+        if (adapterId === this.activeProviderId && session.mode === "tui"
+          && lowQuotaResetAvailable(usage, this.settings.resetThresholdPercent, this.now())) {
+          const noticeKey = `${adapterId}:${fingerprint}`;
+          if (!this.resetNotices.has(noticeKey) && session.notify) {
+            const shown = session.notify(`${adapter.name}: 5-hour allowance below ${this.settings.resetThresholdPercent}%; reset available. Open /usage`);
+            if (shown !== false) this.resetNotices.add(noticeKey);
+          }
+        }
         void this.renderFooter();
         return usage;
       } catch (error) {

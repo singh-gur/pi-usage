@@ -14,6 +14,8 @@ export interface QuotaValue {
 export interface QuotaWindow {
   /** Provider-specific window/group label, e.g. "rolling", "weekly", "key spending". */
   label: string;
+  /** Exact rolling duration when identified by the adapter. */
+  durationSeconds?: number;
   /** Consumed percentage (0-100) where the provider reports one. */
   usedPercent?: number;
   /** Consumed amount where the provider reports one. */
@@ -54,6 +56,20 @@ export interface ProviderError {
   message: string;
 }
 
+/** A provider-confirmed, redeemable reset; identifiers are never rendered. */
+export interface ResetOffer {
+  id: string;
+  label: string;
+  expiresAt?: number;
+}
+
+export interface ResetAvailability {
+  offers: ResetOffer[];
+  availableCount?: number;
+  /** Fixed guidance for read-only inventory or unavailable contracts. */
+  notice?: string;
+}
+
 /** Normalized result for one provider refresh. */
 export interface ProviderUsage {
   providerId: string;
@@ -63,6 +79,7 @@ export interface ProviderUsage {
   /** Epoch ms when the data was captured. */
   capturedAt: number;
   windows: QuotaWindow[];
+  resets?: ResetAvailability;
   /** Notice shown when some windows were malformed but others survived. */
   partialNotice?: string;
   /** Present when the refresh failed; windows may still hold prior usable data. */
@@ -101,6 +118,10 @@ export interface QuotaAdapter {
   allowedOAuthOrigins?: readonly string[];
   domainLabel: string;
   fetchQuota(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ProviderUsage>;
+  fetchResets?(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ResetAvailability>;
+  redeemReset?(auth: QuotaFetchAuth, offer: ResetOffer, getJson: QuotaRequester,
+    postJson: (url: string, headers: Record<string, string>, body: unknown) => Promise<{ status: number; data: unknown }>,
+    requestId: string): Promise<string>;
 }
 
 /** Internal error carrying a sanitized category; adapters throw, commands catch. */

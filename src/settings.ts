@@ -11,6 +11,8 @@ export interface UsageSettings {
   refreshAfterTurn: boolean;
   /** Retained setting name; now controls the cache-read percentage in the footer. */
   showSessionBar: boolean;
+  /** Notify below this remaining 5-hour percentage; zero disables notices. */
+  resetThresholdPercent: number;
 }
 
 export type UsageSettingsFile = Partial<UsageSettings>;
@@ -20,13 +22,14 @@ export const DEFAULT_USAGE_SETTINGS: Readonly<UsageSettings> = {
   pollIntervalMinutes: 5,
   refreshAfterTurn: true,
   showSessionBar: true,
+  resetThresholdPercent: 10,
 };
 
 export const SETTINGS_FILENAME = "pi-usage.json";
 const MAX_SETTINGS_BYTES = 64 * 1024;
 const FOOTER_FORMATS = new Set<FooterFormat>(["full", "compact", "off"]);
 const POLL_INTERVALS = new Set<PollIntervalMinutes>([0, 1, 5, 15, 30]);
-const KNOWN_KEYS = new Set<keyof UsageSettings>(["footerFormat", "pollIntervalMinutes", "refreshAfterTurn", "showSessionBar"]);
+const KNOWN_KEYS = new Set<keyof UsageSettings>(["footerFormat", "pollIntervalMinutes", "refreshAfterTurn", "showSessionBar", "resetThresholdPercent"]);
 
 export interface UsageSettingsPaths {
   global: string;
@@ -85,6 +88,11 @@ export function parseUsageSettings(value: unknown, scope: "global" | "project"):
   if (input.showSessionBar !== undefined) {
     if (typeof input.showSessionBar === "boolean") settings.showSessionBar = input.showSessionBar;
     else warnings.push(`Ignoring invalid ${scope} setting "showSessionBar"`);
+  }
+  if (input.resetThresholdPercent !== undefined) {
+    const value = input.resetThresholdPercent;
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100) settings.resetThresholdPercent = value;
+    else warnings.push(`Ignoring invalid ${scope} setting "resetThresholdPercent"`);
   }
   return { settings, warnings };
 }

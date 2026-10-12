@@ -16,6 +16,7 @@
  * require an Admin key Pi does not resolve) is out of scope.
  */
 import type { GetJson } from "../http.ts";
+import { resetResponse } from "../resets.ts";
 import {
   UsageError,
   finiteNumber,
@@ -48,7 +49,7 @@ function utilizationWindow(raw: unknown, label: string): QuotaWindow | "malforme
   if (window.utilization === undefined && window.resets_at === undefined) return undefined;
   const consumed = window.utilization === undefined ? undefined : parseConsumed(window.utilization);
   if (window.utilization !== undefined && consumed === undefined) return "malformed";
-  const result: QuotaWindow = { label };
+  const result: QuotaWindow = { label, ...(label === "5-hour" ? { durationSeconds: 18_000 } : {}) };
   if (consumed !== undefined) result.usedPercent = consumed;
   const resetsAt = parseResetTime(window.resets_at);
   if (resetsAt !== undefined) result.resetsAt = resetsAt;
@@ -72,7 +73,7 @@ function limitWindow(entry: unknown): QuotaWindow | "malformed" | "skip" {
     const name = record(record(limit.scope)?.model)?.display_name;
     label = typeof name === "string" && name.length > 0 ? `7-day (${name})` : "7-day (scoped)";
   }
-  const result: QuotaWindow = { label };
+  const result: QuotaWindow = { label, ...(kind === "session" ? { durationSeconds: 18_000 } : {}) };
   if (consumed !== undefined) result.usedPercent = consumed;
   const resetsAt = parseResetTime(limit.resets_at);
   if (resetsAt !== undefined) result.resetsAt = resetsAt;
@@ -159,22 +160,50 @@ export function interpretAnthropic(
   return result;
 }
 
+function anthropicHeaders(auth: QuotaFetchAuth): Record<string, string> {
+  if (!auth.oauth) throw new UsageError("auth", "Anthropic quota requires subscription OAuth credentials");
+  return { accept: "application/json", authorization: `Bearer ${auth.apiKey}`, "anthropic-beta": OAUTH_BETA };
+}
+
 export const anthropicAdapter: QuotaAdapter = {
   id: "anthropic",
   name: "Anthropic",
   officialOrigin: "https://api.anthropic.com",
   domainLabel: "Claude subscription allowance",
   async fetchQuota(auth: QuotaFetchAuth, getJson: GetJson): Promise<ProviderUsage> {
-    if (!auth.oauth) {
-      // Subscription OAuth only; standard API keys (and Admin keys, which Pi
-      // does not resolve) are never substituted for quota access.
-      throw new UsageError("auth", "Anthropic quota requires subscription OAuth credentials");
-    }
-    const response = await getJson(USAGE_URL, {
-      accept: "application/json",
-      authorization: `Bearer ${auth.apiKey}`,
-      "anthropic-beta": OAUTH_BETA,
-    });
+    const response = await getJson(USAGE_URL, anthropicHeaders(auth));
     return interpretAnthropic(response.status, response.data);
+  },
+  async fetchResets(auth, getJson) {
+    // Source-derived juniper_tide contract: OmniRoute release/v3.8.51 claudeLimitReset.ts.
+    const response = await getJson(`${USAGE_URL}?at_wall=1&skip_spend=1`, anthropicHeaders(auth));
+    const root = resetResponse(response.status, response.data);
+    const raw = record(root.juniper_tide);
+    if (!raw) return { offers: [], notice: "No supported 5-hour reset offer reported" };
+    const available = raw.eligible === true && raw.arm === "reset" && raw.available === true;
+    const weeklyAt = typeof raw.weekly_resets_at === "string" ? parseResetTime(raw.weekly_resets_at) : undefined;
+    // A stable weekly identity prevents retrying an ambiguous, non-idempotent claim.
+    if (available && (weeklyAt === undefined || weeklyAt <= Date.now())) {
+      return { offers: [], notice: "Reset offer lacks a usable weekly identity" };
+    }
+    return { availableCount: available ? 1 : 0,
+      offers: available ? [{ id: `juniper_tide:${weeklyAt}`, label: "5-hour reset (weekly limit unchanged)" }] : [] };
+  },
+  async redeemReset(auth, _offer, getJson, postJson) {
+    const headers = anthropicHeaders(auth);
+    const profileResponse = await getJson("https://api.anthropic.com/api/oauth/profile", headers);
+    const profile = resetResponse(profileResponse.status, profileResponse.data);
+    const uuid = record(profile.organization)?.uuid;
+    if (typeof uuid !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(uuid)) {
+      throw new UsageError("unsupported", "No usable organization resolved for reset");
+    }
+    const response = await postJson(`https://api.anthropic.com/api/organizations/${uuid}/reset_rate_limits`,
+      headers, { program: "juniper_tide" });
+    const root = resetResponse(response.status, response.data);
+    if (root.result === "reset") return "5-hour reset redeemed; weekly limit unchanged";
+    if (root.result === "already_used") return "Reset was already used";
+    if (root.result === "not_limited") return "No eligible quota window to reset";
+    if (root.result === "ineligible" || root.result === "unavailable") return "Reset is no longer available";
+    throw new UsageError("unsupported", "Reset outcome unknown; check provider usage before trying again");
   },
 };

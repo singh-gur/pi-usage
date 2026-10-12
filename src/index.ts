@@ -10,7 +10,7 @@ import { getSettingsListTheme, type ExtensionAPI, type ExtensionContext } from "
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 import type { AuthGateway } from "./auth.ts";
 import { UsageMonitor, type MonitorSession } from "./refresh.ts";
-import type { QuotaAdapter } from "./types.ts";
+import { UsageError, type QuotaAdapter } from "./types.ts";
 import { UsageView, formatCacheReadPercent, type UsageEntry } from "./ui.ts";
 import { collectSessionUsage, sessionTokenTotals } from "./session-usage.ts";
 import {
@@ -84,6 +84,8 @@ export default function (pi: ExtensionAPI) {
   let quotaStatus: string | undefined;
   let cacheReadStatus: string | undefined;
   let footerGeneration = 0;
+  let sessionEpoch = 0;
+  let usageOpen = false;
   const renderStatus = (ctx: ExtensionContext) => {
     if (ctx.mode !== "tui") return;
     ctx.ui.setStatus("usage", [cacheReadStatus, quotaStatus].filter(Boolean).join(" · ") || undefined);
@@ -101,6 +103,11 @@ export default function (pi: ExtensionAPI) {
     const generation = ++footerGeneration;
     return {
       ...sessionFrom(ctx),
+      notify: (message) => {
+        if (usageOpen || generation !== footerGeneration || ctx.mode !== "tui") return false;
+        ctx.ui.notify(message, "info");
+        return true;
+      },
       setStatus: (_key, text) => {
         if (generation !== footerGeneration || !footerContext) return;
         quotaStatus = text;
@@ -127,6 +134,7 @@ export default function (pi: ExtensionAPI) {
       if (ctx.mode !== "tui") return;
 
       const session = bindSession(ctx);
+      const epoch = sessionEpoch;
       // Bind on demand if lifecycle events were missed; otherwise keep refs fresh.
       if (!monitor.hasSession) {
         await loadAndApplySettings(ctx);
@@ -156,20 +164,54 @@ export default function (pi: ExtensionAPI) {
         }),
       );
 
-      await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-        const view = new UsageView({
-          theme,
-          getEntries: () => entries,
-          onClose: () => {
-            // Shared refreshes also serve the footer; do not abort them here.
-            done(undefined);
-          },
-          requestRender: () => tui.requestRender(),
-          getViewportRows: () => tui.terminal.rows,
-        });
-        requestRender = () => tui.requestRender();
-        return view;
-      });
+      let selectedName: string | undefined;
+      usageOpen = true;
+      try {
+        for (;;) {
+          const selected = await ctx.ui.custom<UsageEntry | undefined>((tui, theme, _keybindings, done) => {
+            const view = new UsageView({
+              theme,
+              getEntries: () => entries,
+              ...(selectedName === undefined ? {} : { selectedName }),
+              onClose: () => done(undefined),
+              onReset: (entry) => done(entry),
+              requestRender: () => tui.requestRender(),
+              getViewportRows: () => tui.terminal.rows,
+            });
+            requestRender = () => tui.requestRender();
+            return view;
+          });
+          requestRender = undefined;
+          if (!selected?.usage || epoch !== sessionEpoch) break;
+          selectedName = selected.name;
+          try {
+            const selection = await monitor.prepareReset(selected.usage.providerId);
+            const labels = selection.offers.map((offer, index) => `${index + 1}. ${offer.label} — expires ${
+              offer.expiresAt === undefined ? "not reported" : new Date(offer.expiresAt).toISOString()}`);
+            if (epoch !== sessionEpoch) break;
+            const choice = await ctx.ui.select(`${selected.name}: select a reset`, ["Cancel", ...labels]);
+            if (epoch !== sessionEpoch) break;
+            const index = labels.indexOf(choice ?? "");
+            if (index < 0) continue;
+            const offer = selection.offers[index]!;
+            const windows = selection.usage.windows.map((window) => `${window.label.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")}: ${
+              window.usedPercent === undefined ? "usage unknown" : `${100 - window.usedPercent}% remaining`}`).join("; ");
+            const confirmation = await ctx.ui.select(`${selected.name}: ${offer.label}. ${windows}. Consuming a reset cannot be undone.`,
+              ["Cancel", "Consume reset"]);
+            if (confirmation !== "Consume reset") continue;
+            const message = await monitor.redeemReset(selection, offer.id);
+            if (epoch === sessionEpoch) ctx.ui.notify(message, "info");
+          } catch (error) {
+            if (epoch === sessionEpoch) ctx.ui.notify(error instanceof UsageError ? error.message : "Reset failed", "warning");
+          }
+          if (epoch !== sessionEpoch) break;
+          const adapter = monitor.adapterFor(selected.usage.providerId);
+          if (adapter) selected.usage = await monitor.serveCached(adapter.id) ?? await monitor.refreshProvider(adapter);
+        }
+      } finally {
+        usageOpen = false;
+        requestRender = undefined;
+      }
     },
   });
 
@@ -217,6 +259,18 @@ export default function (pi: ExtensionAPI) {
           values: project ? ["inherit", "on", "off"] : ["on", "off"],
         },
         {
+          id: "resetThresholdPercent",
+          label: "Low-quota reset notice",
+          description: "Notify below this remaining 5-hour percentage when a reset is available; 0 disables notices",
+          currentValue: project && file.resetThresholdPercent === undefined ? "inherit"
+            : `${file.resetThresholdPercent ?? DEFAULT_USAGE_SETTINGS.resetThresholdPercent}%`,
+          values: [
+            ...(project ? ["inherit"] : []),
+            ...[...new Set([0, 5, 10, 15, 20, 25, 50, 100,
+              file.resetThresholdPercent ?? inherited.resetThresholdPercent])].sort((a, b) => a - b).map((value) => `${value}%`),
+          ],
+        },
+        {
           id: "refreshAfterTurn",
           label: "Refresh after turn",
           description: project ? `inherit uses global value: ${inherited.refreshAfterTurn ? "on" : "off"}` : "Refresh after a settled turn when cached data is at least one minute old",
@@ -246,6 +300,8 @@ export default function (pi: ExtensionAPI) {
               file.refreshAfterTurn = value === "on";
             } else if (id === "showSessionBar") {
               file.showSessionBar = value === "on";
+            } else if (id === "resetThresholdPercent") {
+              file.resetThresholdPercent = Number.parseInt(value, 10);
             }
             const settings = project
               ? mergeUsageSettings(loaded.global, file)
@@ -308,6 +364,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     const ctx = footerContext;
     footerGeneration++;
+    sessionEpoch++;
     cacheReadStatus = undefined;
     quotaStatus = undefined;
     footerContext = undefined;

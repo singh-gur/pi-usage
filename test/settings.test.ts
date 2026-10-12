@@ -20,12 +20,14 @@ test("settings: defaults and project overrides merge without mutation", () => {
     pollIntervalMinutes: 15,
     refreshAfterTurn: false,
     showSessionBar: true,
+    resetThresholdPercent: 10,
   });
   assert.deepEqual(DEFAULT_USAGE_SETTINGS, {
     footerFormat: "full",
     pollIntervalMinutes: 5,
     refreshAfterTurn: true,
     showSessionBar: true,
+    resetThresholdPercent: 10,
   });
 });
 
@@ -66,6 +68,7 @@ test("settings: global and trusted project files load with project precedence", 
       pollIntervalMinutes: 0,
       refreshAfterTurn: false,
       showSessionBar: false,
+      resetThresholdPercent: 10,
     });
     assert.deepEqual(trusted.warnings, []);
 
@@ -75,6 +78,7 @@ test("settings: global and trusted project files load with project precedence", 
       pollIntervalMinutes: 15,
       refreshAfterTurn: true,
       showSessionBar: true,
+      resetThresholdPercent: 10,
     });
     assert.deepEqual(untrusted.project, {});
   } finally {

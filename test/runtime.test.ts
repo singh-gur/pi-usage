@@ -477,7 +477,7 @@ test("monitor: poll interval is configurable and can be disabled", async () => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
   try {
     const oneMinute = monitorEnv({
-      settings: { footerFormat: "full", pollIntervalMinutes: 1, refreshAfterTurn: true, showSessionBar: true },
+      settings: { footerFormat: "full", pollIntervalMinutes: 1, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 10 },
     });
     oneMinute.monitor.startSession(oneMinute.session, "opencode-go");
     await drain();
@@ -487,7 +487,7 @@ test("monitor: poll interval is configurable and can be disabled", async () => {
     oneMinute.monitor.shutdown();
 
     const disabled = monitorEnv({
-      settings: { footerFormat: "full", pollIntervalMinutes: 0, refreshAfterTurn: true, showSessionBar: true },
+      settings: { footerFormat: "full", pollIntervalMinutes: 0, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 10 },
     });
     disabled.monitor.startSession(disabled.session, "opencode-go");
     await drain();
@@ -523,7 +523,7 @@ test("monitor: after-turn refresh can be disabled", async () => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
   try {
     const env = monitorEnv({
-      settings: { footerFormat: "full", pollIntervalMinutes: 5, refreshAfterTurn: false, showSessionBar: true },
+      settings: { footerFormat: "full", pollIntervalMinutes: 5, refreshAfterTurn: false, showSessionBar: true, resetThresholdPercent: 10 },
     });
     env.monitor.startSession(env.session, "opencode-go");
     await drain();
@@ -705,11 +705,11 @@ test("monitor: footer format changes apply immediately and off suppresses automa
     const env = monitorEnv();
     env.monitor.startSession(env.session, "opencode-go");
     await drain();
-    env.monitor.setSettings({ footerFormat: "compact", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true });
+    env.monitor.setSettings({ footerFormat: "compact", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 10 });
     await drain();
     assert.equal(lastStatus(env)?.text, "🟢 87.5%", "cached footer rerenders compactly");
 
-    env.monitor.setSettings({ footerFormat: "off", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true });
+    env.monitor.setSettings({ footerFormat: "off", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 10 });
     await drain();
     assert.deepEqual(lastStatus(env), { key: STATUS_KEY, text: undefined });
     mock.timers.tick(POLL_INTERVAL_MS * 2);

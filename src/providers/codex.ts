@@ -11,6 +11,7 @@
  * quotas are never merged.
  */
 import type { GetJson } from "../http.ts";
+import { availableResetOffers, resetResponse } from "../resets.ts";
 import {
   UsageError,
   finiteNumber,
@@ -74,6 +75,7 @@ function codexWindow(entry: unknown, label: string): QuotaWindow | undefined {
   const duration = finiteNumber(raw.limit_window_seconds);
   if (duration !== undefined && duration > 0) {
     window.label = `${label} · ${windowDurationLabel(duration)}`;
+    window.durationSeconds = duration;
   }
   return window.usedPercent !== undefined || window.resetsAt !== undefined ? window : undefined;
 }
@@ -149,23 +151,47 @@ export function interpretCodex(
   return result;
 }
 
+function codexHeaders(auth: QuotaFetchAuth): Record<string, string> {
+  if (!auth.oauth) throw new UsageError("auth", "Codex quota requires subscription OAuth credentials");
+  const accountId = codexAccountId(auth.apiKey);
+  if (accountId instanceof UsageError) throw accountId;
+  return { authorization: `Bearer ${auth.apiKey}`, "chatgpt-account-id": accountId };
+}
+
 export const codexAdapter: QuotaAdapter = {
   id: "openai-codex",
   name: "OpenAI Codex",
   officialOrigin: "https://chatgpt.com",
   domainLabel: "ChatGPT subscription allowance",
   async fetchQuota(auth: QuotaFetchAuth, getJson: GetJson): Promise<ProviderUsage> {
-    if (!auth.oauth) {
-      // The provider supports subscription OAuth only; API credentials are
-      // never substituted for quota access.
-      throw new UsageError("auth", "Codex quota requires subscription OAuth credentials");
-    }
-    const accountId = codexAccountId(auth.apiKey);
-    if (accountId instanceof UsageError) throw accountId;
-    const response = await getJson(USAGE_URL, {
-      authorization: `Bearer ${auth.apiKey}`,
-      "chatgpt-account-id": accountId,
-    });
+    const response = await getJson(USAGE_URL, codexHeaders(auth));
     return interpretCodex(response.status, response.data);
+  },
+  async fetchResets(auth, getJson) {
+    // Contract: openai/codex backend-client/src/client/rate_limit_resets.rs.
+    const response = await getJson("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", codexHeaders(auth));
+    const root = resetResponse(response.status, response.data);
+    if (!Array.isArray(root.credits) || !Number.isSafeInteger(root.available_count) || (root.available_count as number) < 0) {
+      throw new UsageError("unsupported", "Unrecognized Codex reset inventory");
+    }
+    const offers = root.credits.flatMap((item: unknown) => {
+      const raw = item as Record<string, unknown> | null;
+      if (!raw || raw.status !== "available" || raw.reset_type !== "codex_rate_limits"
+        || typeof raw.id !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(raw.id)) return [];
+      const expiresAt = raw.expires_at == null ? undefined : parseResetTime(raw.expires_at);
+      if (raw.expires_at != null && (typeof raw.expires_at !== "string" || expiresAt === undefined)) return [];
+      return [{ id: raw.id, label: "Full reset (5-hour + weekly; weekly schedule restarts)", ...(expiresAt === undefined ? {} : { expiresAt }) }];
+    });
+    return { availableCount: root.available_count as number,
+      offers: root.available_count === 0 ? [] : availableResetOffers(offers) };
+  },
+  async redeemReset(auth, offer, _getJson, postJson, requestId) {
+    const response = await postJson("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume",
+      codexHeaders(auth), { redeem_request_id: requestId, credit_id: offer.id });
+    const root = resetResponse(response.status, response.data);
+    if (root.code === "reset" || root.code === "already_redeemed") return "Reset redeemed";
+    if (root.code === "nothing_to_reset") return "No eligible quota window to reset";
+    if (root.code === "no_credit") return "No reset is available anymore";
+    throw new UsageError("unsupported", "Reset outcome unknown; check provider usage before trying again");
   },
 };

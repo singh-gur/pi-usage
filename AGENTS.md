@@ -5,7 +5,7 @@ Repo-scoped rules for agents working in `pi-usage`. The global rules in
 
 ## Project
 
-`pi-usage` is an independently implemented, read-only Pi extension package
+`pi-usage` is an independently implemented Pi extension package
 that reports provider subscription quota (Codex, OpenCode Go, Z.ai, Kimi,
 Grok, GitHub Copilot, Anthropic) and OpenRouter key allowance through a `/usage` command
 and an additive footer indicator. Package settings are managed through
@@ -14,7 +14,7 @@ must remain trust-gated.
 
 `/usage` has a separate **Current session** tab with active-branch horizontal
 bars by provider/model and input, output, cache read, and cache write. Provider
-tabs remain quota-only. The shared additive `usage` status combines quota text
+tabs show quota and provider reset availability, never session token charts. The shared additive `usage` status combines quota text
 with only the cache-read percentage across all providers: cache-read tokens
 as a share of all recorded session tokens, matching the session legend (not
 an input-only cache-hit rate). Empty sessions show `cache read —`.
@@ -28,6 +28,23 @@ cache warming), regardless of operation kind. Unattributed tool/summary usage
 appears as "Other usage" inside Current session. Missing counts are partial,
 not verified zeros; reasoning is already included in output. Very small shares
 can round out of bars; exact counts remain in the session legends.
+
+`/usage` offers `r` for source-derived Codex banked resets and Anthropic's
+`juniper_tide` 5-hour offer only; selection and redemption both default to Cancel.
+Resolve and revalidate credentials through Pi, recheck inventory before POST,
+reject expired offers, serialize redemption, and never automatically retry an
+uncertain mutation. Reset POST transport accepts only the inspected routes.
+Refresh quota after every attempted POST. Codex full resets also restart the
+weekly schedule; Anthropic's supported reset leaves weekly usage intact.
+Z.ai reset-card inventory is read-only, with guidance to redeem/check expiry in
+ZCode; no verified redemption contract is implemented. OpenCode Go and all other
+providers have no reset action. No purchases, credential fallbacks, or live reset
+requests during verification. All reset support is source-derived, not live-verified.
+`resetThresholdPercent` defaults to 10 (integer 0–100; 0 disables notices).
+Non-blocking notices require a confirmed available reset and an identified
+5-hour window below the remaining threshold, cover the active provider only,
+and are suppressed after one notice per credential/session and while `/usage`
+is open. Existing footer-off and offline networking rules remain unchanged.
 
 GitHub Copilot (`github-copilot`) reports the main allowance only,
 percentage-based, from the undocumented `api.github.com/copilot_internal/user`

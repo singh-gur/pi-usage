@@ -11,6 +11,7 @@
  * TIME_LIMIT MCP/tool allowance stays a separate window.
  */
 import type { GetJson } from "../http.ts";
+import { resetResponse } from "../resets.ts";
 import {
   UsageError,
   finiteNumber,
@@ -44,7 +45,7 @@ export function zaiWindowId(unit: unknown, number: unknown): string {
 }
 
 function limitWindow(entry: LimitEntry, label: string, unit: string): QuotaWindow | undefined {
-  const window: QuotaWindow = { label };
+  const window: QuotaWindow = { label, ...(label === "5-hour" ? { durationSeconds: 18_000 } : {}) };
   const usedPercent = finiteNumber(entry.percentage);
   if (usedPercent !== undefined) window.usedPercent = usedPercent;
   const limit = finiteNumber(entry.usage);
@@ -55,7 +56,8 @@ function limitWindow(entry: LimitEntry, label: string, unit: string): QuotaWindo
   if (remaining !== undefined) window.remaining = { value: remaining, unit };
   const resetsAt = parseResetTime(entry.nextResetTime);
   if (resetsAt !== undefined) window.resetsAt = resetsAt;
-  return Object.keys(window).length > 1 ? window : undefined;
+  return usedPercent !== undefined || window.limit || window.used || window.remaining || resetsAt !== undefined
+    ? window : undefined;
 }
 
 /** Pure interpretation of a Z.ai quota-limit response. */
@@ -131,5 +133,21 @@ export const zaiAdapter: QuotaAdapter = {
     // Official plugin convention: raw key, no Bearer prefix.
     const response = await getJson(USAGE_URL, { authorization: auth.apiKey });
     return interpretZai(response.status, response.data);
+  },
+  async fetchResets(auth, getJson) {
+    // Inventory only: quota-axi/src/providers/zai-coding-plan.ts. No verified redemption contract.
+    const response = await getJson("https://api.z.ai/api/biz/customer-package-reset/list?targetType=PERSONAL",
+      { authorization: `Bearer ${auth.apiKey}` });
+    const root = resetResponse(response.status, response.data);
+    const data = root.data as { fiveHourResets?: unknown; weekResets?: unknown } | null;
+    if (root.code !== 200 || root.success !== true || !Array.isArray(data?.fiveHourResets) || !Array.isArray(data?.weekResets)) {
+      throw new UsageError("unsupported", "Unrecognized Z.ai reset inventory");
+    }
+    const count = (cards: unknown[]) => cards.filter((card) =>
+      typeof card === "object" && card !== null && (card as { available?: unknown }).available === true).length;
+    const fiveHour = count(data.fiveHourResets);
+    const weekly = count(data.weekResets);
+    return { offers: [], availableCount: fiveHour + weekly,
+      notice: `${fiveHour} 5-hour / ${weekly} weekly cards. Check expiry and redeem in ZCode; in-Pi redemption unavailable` };
   },
 };

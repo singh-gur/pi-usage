@@ -1,8 +1,8 @@
 /**
- * Bounded, read-only HTTP for quota endpoints.
+ * Bounded HTTP for quota reads and explicitly confirmed reset redemption.
  *
  * Safety invariants:
- * - GET only, fixed https URLs, no URL credentials, redirects rejected.
+ * - GET reads; POST restricted to known reset routes. No URL credentials or redirects.
  * - 10s per request timeout, 128 KiB max body.
  * - Errors are sanitized: no raw upstream exception messages or bodies leak.
  */
@@ -17,6 +17,7 @@ export interface HttpResponse {
 }
 
 export type GetJson = (url: string, headers: Record<string, string>) => Promise<HttpResponse>;
+export type PostJson = (url: string, headers: Record<string, string>, body: unknown) => Promise<HttpResponse>;
 
 export interface HttpLimits {
   timeoutMs: number;
@@ -83,40 +84,58 @@ export function parseRetryAfter(raw: string | null, now: number = Date.now()): n
  * fetch itself is also aborted by the per-request timeout.
  */
 export function createGetJson(limits: HttpLimits = DEFAULT_HTTP_LIMITS, signal?: AbortSignal): GetJson {
-  return async (url, headers) => {
-    validateUrl(url);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), limits.timeoutMs);
-    const onOuterAbort = () => controller.abort();
-    signal?.addEventListener("abort", onOuterAbort, { once: true });
+  return (url, headers) => requestJson(url, headers, "GET", undefined, limits, signal);
+}
+
+/** No generic mutation transport: only the two inspected redemption routes. */
+export function createPostJson(limits: HttpLimits = DEFAULT_HTTP_LIMITS, signal?: AbortSignal): PostJson {
+  return (url, headers, body) => {
+    const parsed = validateUrl(url);
+    const allowed = url === "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+      || (parsed.origin === "https://api.anthropic.com"
+        && /^\/api\/organizations\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/reset_rate_limits$/.test(parsed.pathname)
+        && parsed.search === "" && parsed.hash === "");
+    if (!allowed) throw new UsageError("request", "Refusing unknown reset endpoint");
+    return requestJson(url, { ...headers, "content-type": "application/json" }, "POST", JSON.stringify(body), limits, signal);
+  };
+}
+
+async function requestJson(url: string, headers: Record<string, string>, method: "GET" | "POST",
+  body: string | undefined, limits: HttpLimits, signal?: AbortSignal): Promise<HttpResponse> {
+  validateUrl(url);
+  if (isOffline()) throw new UsageError("canceled", "Quota networking suppressed (PI_OFFLINE)");
+  if (signal?.aborted) throw new UsageError("canceled", "Request canceled");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), limits.timeoutMs);
+  const onOuterAbort = () => controller.abort();
+  signal?.addEventListener("abort", onOuterAbort, { once: true });
+  try {
     let response: Response;
     try {
       response = await fetch(url, {
-        method: "GET",
+        method,
         headers,
+        ...(body === undefined ? {} : { body }),
         redirect: "error",
         signal: controller.signal,
       });
-    } catch (error) {
-      if (signal?.aborted) throw new UsageError("canceled", "Request canceled");
-      if (controller.signal.aborted) throw new UsageError("timeout", "Request timed out");
-      // ponytail: fetch rejections carry local network detail; never surface them.
+    } catch {
       throw new UsageError("request", "Network request failed");
-    } finally {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onOuterAbort);
     }
     let data: unknown = null;
-    try {
-      const body = await readBoundedBody(response, limits.maxBytes);
-      if (body.length > 0) data = JSON.parse(body);
-    } catch (error) {
-      if (error instanceof UsageError) throw error;
-      throw new UsageError("request", "Response was not valid JSON");
-    }
+    const text = await readBoundedBody(response, limits.maxBytes);
+    if (text.length > 0) data = JSON.parse(text);
     const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
     return retryAfterMs === undefined ? { status: response.status, data } : { status: response.status, data, retryAfterMs };
-  };
+  } catch (error) {
+    if (signal?.aborted) throw new UsageError("canceled", "Request canceled");
+    if (controller.signal.aborted) throw new UsageError("timeout", "Request timed out");
+    if (error instanceof UsageError) throw error;
+    throw new UsageError("request", "Response was not valid JSON");
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", onOuterAbort);
+  }
 }
 
 /**

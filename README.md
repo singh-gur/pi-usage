@@ -72,7 +72,31 @@ Filled bars show **consumed** allowance; the label beside each bar shows **what 
 | --- | --- |
 | Switch provider | `←` / `→`, `h` / `l`, `Tab` / `Shift+Tab` |
 | Scroll | `↑` / `↓`, `j` / `k`, `Page Up` / `Page Down`, `Home` / `End` |
+| Reset (supported available offer only) | `r` — select, then explicitly confirm |
 | Close | `Esc`, `Enter`, or `q` |
+
+### Redeem an available reset
+
+On a supported provider tab, press **`r`** to select an available reset and review
+its expiry and current quota. A second prompt requires **Consume reset**; both
+prompts default to **Cancel**. Nothing is redeemed automatically or purchased.
+
+- **Codex:** banked full resets restore eligible 5-hour/weekly windows and restart the weekly schedule.
+- **Anthropic:** supports the account-specific `juniper_tide` 5-hour offer only; weekly usage remains unchanged. Other promotional reset grants are not implemented.
+- **Z.ai:** lists provider-reported 5-hour/weekly reset-card counts. Check expiry and redeem in **ZCode**; in-Pi redemption is unavailable because its contract has not been verified.
+- Other providers, including **OpenCode Go**, have no reset action.
+
+Below **10% remaining** in an identified 5-hour window, the active provider can
+show a non-blocking notice to open `/usage`, but only when a reset is available.
+Notices are suppressed while the usage screen is open and after one notice per
+credential/session. Change **Low-quota reset notice** in `/usage-settings`;
+**0%** disables notices. Footer-off disables automatic quota networking as before.
+
+Reset APIs are undocumented/source-derived and **not live-verified**. Account
+eligibility and credential acceptance vary. Uncertain redemption failures are
+never automatically retried; check provider usage before another attempt.
+The same reset cannot be attempted twice with the same credential in one
+extension instance, including after an uncertain outcome.
 
 ### A glance instead of another command
 
@@ -123,6 +147,7 @@ Run `/usage-settings` to choose **Global** or **Project** settings. Changes appl
 | Cache read percentage | On / off | On |
 | Poll interval | Off, 1, 5, 15, or 30 minutes | 5 minutes |
 | Refresh after turn | On / off | On |
+| Low-quota reset notice | Remaining-percent presets; 0 disables notices | 10% |
 
 **Prefer manual quota checks only?** Set the provider footer to `off`. This removes quota text and disables automatic quota networking; `/usage` still works. Turn **Cache read percentage** off separately to hide the session indicator too. Setting only the poll interval to off stops the timer, not session, provider-switch, or enabled after-turn refreshes.
 
@@ -136,9 +161,13 @@ Settings live in `~/.pi/agent/pi-usage.json` globally and `<cwd>/.pi/pi-usage.js
   "footerFormat": "full",
   "pollIntervalMinutes": 5,
   "refreshAfterTurn": true,
-  "showSessionBar": true
+  "showSessionBar": true,
+  "resetThresholdPercent": 10
 }
 ```
+
+`resetThresholdPercent` accepts any integer from 0 to 100 in JSON. Project
+threshold overrides remain trust-gated like all package settings.
 
 With the provider footer enabled:
 
@@ -152,9 +181,13 @@ Print, JSON, and RPC modes remain silent. `PI_OFFLINE` suppresses quota networki
 
 </details>
 
-## Read-only by design
+## Read-only quota checks; confirmed resets
 
-Quota requests are **GET-only, to fixed official provider endpoints**. No billing changes, inference requests, or model-context injection. Custom provider base URLs and proxies are refused before credentials are sent, apart from the explicitly allowed official Copilot OAuth routing.
+Quota and reset-inventory requests are **GET-only, to fixed official provider endpoints**.
+Reset redemption is the sole mutation: an explicitly confirmed POST to an
+allowlisted provider reset route. Account and availability are rechecked before
+redemption, overlapping attempts are refused, and quota is refreshed afterward.
+No purchases, inference requests, or model-context injection. Custom provider base URLs and proxies are refused before credentials are sent, apart from the explicitly allowed official Copilot OAuth routing.
 
 The extension resolves credentials through Pi’s public APIs. It does not read credential stores, `.env` files, or browsers itself. Quota results stay in memory, isolated by credential fingerprint so switching accounts cannot show a previous account’s data. Errors use sanitized categories; raw response bodies, tokens, and account identifiers are not displayed.
 

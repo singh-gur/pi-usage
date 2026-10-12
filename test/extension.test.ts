@@ -29,7 +29,7 @@ after(async () => {
 
 interface CustomHandle {
   component: { render(width: number): string[]; handleInput(data: string): void; invalidate(): void };
-  done: (value: undefined) => void;
+  done: (value: UsageEntry | undefined) => void;
   doneCalled: () => boolean;
 }
 
@@ -82,12 +82,12 @@ function makeCtx(options: {
 
   let customHandlesCurrent: CustomHandle[] = [];
   const notifications: Array<{ message: string; level: string }> = [];
-  const custom = (factoryFn: (tui: unknown, theme: unknown, kb: unknown, done: (v: undefined) => void) => unknown) =>
-    new Promise<undefined>((resolve) => {
+  const custom = (factoryFn: (tui: unknown, theme: unknown, kb: unknown, done: (v: UsageEntry | undefined) => void) => unknown) =>
+    new Promise<UsageEntry | undefined>((resolve) => {
       let doneCalled = false;
-      const done = () => {
+      const done = (value: UsageEntry | undefined) => {
         doneCalled = true;
-        resolve(undefined);
+        resolve(value);
       };
       const tui = { requestRender: () => {}, terminal: { rows: 40 } };
       const component = factoryFn(tui, IDENTITY_THEME, {}, done) as CustomHandle["component"];
@@ -116,7 +116,7 @@ function makeCtx(options: {
     ui: {
       theme: IDENTITY_THEME,
       custom,
-      select: async () => selections.shift(),
+      select: async (_title: string, _options: string[]) => selections.shift(),
       notify: (message: string, level: string) => notifications.push({ message, level }),
       setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
     },
@@ -1241,3 +1241,84 @@ test("extension: independent cache-read percentage setting hides and restores it
     await harness.events.get("session_shutdown")!({}, ctx);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("extension: reset notice threshold persists through existing project settings UI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-reset-settings-"));
+  const harness = setupExtension();
+  const { ctx, handles } = makeCtx({ mode: "tui", cwd: root, selections: ["Project"] });
+  try {
+    const promise = harness.commands.get("usage-settings")!.handler("", ctx);
+    await settle();
+    const component = handles[0]!.component;
+    for (let i = 0; i < 3; i++) component.handleInput("\x1b[B");
+    assert.match(component.render(120).join("\n"), /Low-quota reset notice/);
+    for (let i = 0; i < 5; i++) component.handleInput("\r"); // inherit -> 0 -> 5 -> 10 -> 15 -> 20
+    component.handleInput("\x1b");
+    await promise;
+    assert.deepEqual(JSON.parse(await readFile(join(root, ".pi", "pi-usage.json"), "utf8")), { resetThresholdPercent: 20 });
+  } finally {
+    await harness.events.get("session_shutdown")!({}, ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const decision of ["cancel-selection", "cancel-confirmation", "consume"] as const) {
+  test(`extension: reset UI ${decision} requires explicit choices and restores the provider tab`, async () => {
+    const original = globalThis.fetch;
+    const harness = setupExtension();
+    let posts = 0;
+    let used = 95;
+    const expiry = new Date(Date.now() + 86_400_000).toISOString();
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      assert.equal(new URL(url).origin, "https://chatgpt.com");
+      if (init?.method === "POST") {
+        posts++;
+        const body = JSON.parse(String(init.body));
+        assert.equal(body.credit_id, "reset-1");
+        assert.match(body.redeem_request_id, /^[a-f0-9-]{36}$/);
+        used = 0;
+        return new Response(JSON.stringify({ code: "reset" }));
+      }
+      if (url.endsWith("reset-credits")) return new Response(JSON.stringify({
+        available_count: posts ? 0 : 1,
+        credits: posts ? [] : [{ id: "reset-1", reset_type: "codex_rate_limits", status: "available", expires_at: expiry }],
+      }));
+      return new Response(JSON.stringify({ rate_limit: {
+        primary_window: { used_percent: used, limit_window_seconds: 18_000 },
+        secondary_window: { used_percent: 20, limit_window_seconds: 604_800 },
+      } }));
+    }) as typeof fetch;
+    const { ctx, handles, notifications } = makeCtx({ mode: "tui",
+      configured: { "openai-codex": true }, authByKey: { "openai-codex": CODEX_JWT },
+      oauthByKey: { "openai-codex": true }, activeProvider: "openai-codex" });
+    let dialogs = 0;
+    ctx.ui.select = async (_title, options) => {
+      dialogs++;
+      assert.equal(options[0], "Cancel", "safe default for every dialog");
+      if (dialogs === 1) return decision === "cancel-selection" ? "Cancel" : options[1];
+      assert.match(_title, /cannot be undone/);
+      return decision === "consume" ? "Consume reset" : "Cancel";
+    };
+    try {
+      const promise = harness.commands.get("usage")!.handler("", ctx);
+      await settle();
+      assert.match(handles[0]!.component.render(120).join("\n"), /r reset/);
+      handles[0]!.component.handleInput("r");
+      await settle();
+      assert.equal(posts, decision === "consume" ? 1 : 0);
+      assert.equal(dialogs, decision === "cancel-selection" ? 1 : 2);
+      assert.equal(handles.length, 2, "usage screen reopens after selection");
+      assert.match(handles[1]!.component.render(120).join("\n"), /\[OpenAI Codex\]/);
+      if (decision === "consume") {
+        assert.match(handles[1]!.component.render(120).join("\n"), /100% left/);
+        assert.ok(notifications.some(({ message }) => message === "Reset redeemed"));
+      }
+      handles[1]!.component.handleInput("q");
+      await promise;
+    } finally {
+      await harness.events.get("session_shutdown")!({}, ctx);
+      globalThis.fetch = original;
+    }
+  });
+}

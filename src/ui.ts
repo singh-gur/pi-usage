@@ -8,6 +8,7 @@
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { FooterFormat } from "./settings.ts";
 import type { ProviderUsage, QuotaWindow } from "./types.ts";
+import { availableResetOffers } from "./resets.ts";
 import { TOKEN_CATEGORIES, totalTokens, sessionTokenTotals, segmentWidths, type TokenTotals, type SessionProviderUsage } from "./session-usage.ts";
 
 /** Structural theme slice; the real Pi theme satisfies this. */
@@ -162,6 +163,14 @@ function providerLines(entry: UsageEntry, theme: ThemeLike, width: number, showN
     lines.push(theme.fg(color, `  ${label}${usage.error.message}`));
   }
   for (const window of usage.windows) lines.push(...windowLines(window, theme, width));
+  if (usage.resets) {
+    lines.push("", theme.bold(`  Available resets: ${usage.resets.availableCount ?? "unknown"}`));
+    for (const offer of availableResetOffers(usage.resets.offers)) {
+      lines.push(`  ${safeUsageLabel(offer.label)}`);
+      lines.push(theme.fg("dim", `  Expires: ${offer.expiresAt === undefined ? "not reported" : new Date(offer.expiresAt).toISOString()}`));
+    }
+    if (usage.resets.notice) lines.push(theme.fg("dim", `  ${usage.resets.notice}`));
+  }
   if (usage.partialNotice) lines.push(theme.fg("warning", `  partial data: ${usage.partialNotice}`));
   return lines;
 }
@@ -326,6 +335,7 @@ export class UsageView {
   private readonly theme: ThemeLike;
   private readonly getEntries: () => UsageEntry[];
   private readonly onClose: () => void;
+  private readonly onReset: ((entry: UsageEntry) => void) | undefined;
   private readonly requestRender: () => void;
   private readonly getViewportRows: (() => number) | undefined;
   private readonly fixedMaxRows: number | undefined;
@@ -334,6 +344,8 @@ export class UsageView {
     theme: ThemeLike;
     getEntries: () => UsageEntry[];
     onClose: () => void;
+    onReset?: (entry: UsageEntry) => void;
+    selectedName?: string;
     /** Trigger a TUI repaint after input-driven state changes. */
     requestRender: () => void;
     /** Terminal height source; the viewport uses it minus reserved chrome rows. */
@@ -344,6 +356,8 @@ export class UsageView {
     this.theme = options.theme;
     this.getEntries = options.getEntries;
     this.onClose = options.onClose;
+    this.onReset = options.onReset;
+    this.selected = Math.max(0, options.getEntries().findIndex((entry) => entry.name === options.selectedName));
     this.requestRender = options.requestRender;
     this.getViewportRows = options.getViewportRows;
     this.fixedMaxRows = options.maxRows;
@@ -360,6 +374,13 @@ export class UsageView {
   handleInput(data: string): void {
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || data === "q") {
       this.onClose();
+      return;
+    }
+    if (data === "r") {
+      const entry = this.getEntries()[this.selected];
+      if (entry?.usage && !entry.usage.error && availableResetOffers(entry.usage.resets?.offers ?? []).length > 0) {
+        this.onReset?.(entry);
+      }
       return;
     }
     const count = this.getEntries().length;
@@ -412,7 +433,10 @@ export class UsageView {
     const hint = scrolled
       ? this.theme.fg("dim", `${tabHint}↑↓/jk (${this.offset + 1}-${Math.min(this.offset + rows, body.length)} of ${body.length}) · esc close`)
       : this.theme.fg("dim", `${tabHint}↑↓/jk scroll · esc close`);
-    const view = [...tabs, ...visibleBody, hint];
+    const selectedUsage = entries[this.selected]?.usage;
+    const resetHint = this.onReset && selectedUsage && !selectedUsage.error
+      && availableResetOffers(selectedUsage.resets?.offers ?? []).length > 0 ? "r reset · " : "";
+    const view = [...tabs, ...visibleBody, resetHint + hint];
     return view.map((line) => truncateToWidth(line, width));
   }
 
