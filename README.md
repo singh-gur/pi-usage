@@ -54,7 +54,7 @@ To pin a release, append `@<version>` to the npm package spec. Pinned versions a
 ## One command. A clearer picture.
 
 - **See your headroom.** Remaining percentages or amounts, quota bars, and reset timing where the provider reports them.
-- **Check multiple providers.** Quota tabs for configured supported providers; shared and model-specific windows stay separate.
+- **Check multiple providers.** Quota tabs for configured supported providers; the active provider opens first and focused. Shared and model-specific windows stay separate.
 - **Understand this session.** A separate **Current session** tab shows token categories and provider/model shares using horizontal bars, counts, and percentages.
 - **Stay in flow.** An automatic, active-provider footer indicator adds to Pi’s existing status area instead of replacing it.
 - **Know when data needs attention.** Partial results, stale data, and errors are labelled—not disguised as a healthy balance. One provider’s failure does not hide the others.

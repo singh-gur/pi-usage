@@ -12,6 +12,10 @@ and an additive footer indicator. Package settings are managed through
 `/usage-settings` and package-owned `pi-usage.json` files; project overrides
 must remain trust-gated.
 
+`/usage` places the active model's configured supported provider first and focuses
+it on opening; other provider tabs keep their order and Current session stays last.
+Unsupported or unconfigured active providers leave the default tab order unchanged.
+
 `/usage` has a separate **Current session** tab with active-branch horizontal
 bars by provider/model and input, output, cache read, and cache write. Provider
 tabs show quota and provider reset availability, never session token charts. The shared additive `usage` status combines quota text

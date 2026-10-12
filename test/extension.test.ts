@@ -291,6 +291,39 @@ test("extension: unconfigured providers are omitted from the view entirely", asy
   await handlerPromise;
 });
 
+for (const activeProvider of ["openrouter", "opencode-go", "unsupported", "openai-codex"]) {
+  test(`extension: /usage orders and focuses the configured active provider (${activeProvider})`, async () => {
+    const original = globalThis.fetch;
+    const harness = setupExtension();
+    installFetch({
+      "opencode.ai": () => new Response(GO_BODY),
+      "openrouter.ai": () => new Response(OR_BODY),
+    }, harness.fetchCalls);
+    const { ctx, handles } = makeCtx({ mode: "tui", activeProvider,
+      configured: { "opencode-go": true, openrouter: true },
+      authByKey: { "opencode-go": "synthetic-go", openrouter: "synthetic-or" } });
+    try {
+      const promise = harness.commands.get("usage")!.handler("", ctx);
+      await settle();
+      const view = handles[0]!.component;
+      const routerFirst = activeProvider === "openrouter";
+      assert.equal(view.render(200)[0], routerFirst
+        ? "[OpenRouter]  OpenCode Go   Current session "
+        : "[OpenCode Go]  OpenRouter   Current session ");
+      assert.match(view.render(200).join("\n"), routerFirst ? /Key spending allowance/ : /Coding plan allowance/);
+      view.handleInput("l");
+      assert.match(view.render(200).join("\n"), routerFirst ? /Coding plan allowance/ : /Key spending allowance/);
+      view.handleInput("l");
+      assert.match(view.render(200).join("\n"), /\[Current session\]/);
+      view.handleInput("q");
+      await promise;
+    } finally {
+      await harness.events.get("session_shutdown")!({}, ctx);
+      globalThis.fetch = original;
+    }
+  });
+}
+
 test("extension: nothing configured still opens the empty Current session tab", async () => {
   const harness = setupExtension();
   let fetches = 0;

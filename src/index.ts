@@ -143,7 +143,8 @@ export default function (pi: ExtensionAPI) {
 
       updateTokenStatus(ctx);
       const sessionUsage = collectSessionUsage(ctx.sessionManager.getBranch());
-      const adapters = ADAPTERS.filter((adapter) => session.gateway.isConfigured(adapter.id));
+      const adapters = ADAPTERS.filter((adapter) => session.gateway.isConfigured(adapter.id))
+        .sort((a, b) => Number(b.id === ctx.model?.provider) - Number(a.id === ctx.model?.provider));
       // Prefill with cached data (verified against current credentials);
       // the refresh below bypasses cache age but respects backoff.
       const entries: UsageEntry[] = adapters.map((adapter) => ({ name: adapter.name }));
