@@ -1,6 +1,6 @@
 {
   "name": "@singh-gur/pi-usage",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Pi extension: /usage command and indicator for provider subscription quota and OpenRouter key allowance.",
   "author": "singh-gur",
   "license": "MIT",
