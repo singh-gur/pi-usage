@@ -6,9 +6,11 @@
  * footer indicators. Background work starts from session lifecycle events only; it is
  * TUI-only, offline-aware, and fully cleared on session shutdown.
  */
-import { getSettingsListTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getSettingsListTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 import type { AuthGateway } from "./auth.ts";
+import { FileSharedCoordination } from "./coordination.ts";
+import { providersSubmenu, providersSummary, type ProviderPanelContext } from "./provider-settings-ui.ts";
 import { UsageMonitor, type MonitorSession } from "./refresh.ts";
 import { UsageError, type QuotaAdapter } from "./types.ts";
 import { UsageView, formatCacheReadPercent, type UsageEntry } from "./ui.ts";
@@ -78,7 +80,7 @@ function pollMinutes(value: string): PollIntervalMinutes {
 }
 
 export default function (pi: ExtensionAPI) {
-  const monitor = new UsageMonitor({ adapters: ADAPTERS });
+  const monitor = new UsageMonitor({ adapters: ADAPTERS, coordination: new FileSharedCoordination() });
   let showCacheReadPercent = DEFAULT_USAGE_SETTINGS.showSessionBar;
   let footerContext: ExtensionContext | undefined;
   let quotaStatus: string | undefined;
@@ -143,7 +145,8 @@ export default function (pi: ExtensionAPI) {
 
       updateTokenStatus(ctx);
       const sessionUsage = collectSessionUsage(ctx.sessionManager.getBranch());
-      const adapters = ADAPTERS.filter((adapter) => session.gateway.isConfigured(adapter.id))
+      const adapters = ADAPTERS.filter((adapter) =>
+        session.gateway.isConfigured(adapter.id) && !monitor.isReportingDisabled(adapter.id))
         .sort((a, b) => Number(b.id === ctx.model?.provider) - Number(a.id === ctx.model?.provider));
       // Prefill with cached data (verified against current credentials);
       // the refresh below bypasses cache age but respects backoff.
@@ -281,8 +284,46 @@ export default function (pi: ExtensionAPI) {
           values: project ? ["inherit", "on", "off"] : ["on", "off"],
         },
       ];
+      const mergedSettings = () => project
+        ? mergeUsageSettings(loaded.global, file)
+        : mergeUsageSettings(file, loaded.project);
+      // Signed-in providers first, the active model's provider on top.
+      const providerRows = ADAPTERS
+        .map((adapter) => ({ id: adapter.id, name: adapter.name, configured: ctx.modelRegistry.getProviderAuthStatus(adapter.id).configured }))
+        .sort((a, b) => Number(b.id === ctx.model?.provider) - Number(a.id === ctx.model?.provider)
+          || Number(b.configured) - Number(a.configured));
+      const applySettings = () => {
+        changed = true;
+        const settings = mergedSettings();
+        showCacheReadPercent = settings.showSessionBar;
+        updateTokenStatus(ctx);
+        monitor.setSettings(settings);
+      };
 
       await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+        const providerPanel: ProviderPanelContext = {
+          providers: providerRows,
+          project,
+          file,
+          globalProviders: loaded.global.providers,
+          flags: () => {
+            const settings = mergedSettings();
+            return {
+              pollLabel: POLL_LABELS[settings.pollIntervalMinutes],
+              pollOff: settings.pollIntervalMinutes === 0,
+              turnOff: !settings.refreshAfterTurn,
+            };
+          },
+          theme,
+          onChange: applySettings,
+        };
+        items.push({
+          id: "providers",
+          label: "Providers",
+          description: "Per-provider usage reporting: hide a provider, or choose when it refreshes",
+          currentValue: providersSummary(providerPanel),
+          submenu: providersSubmenu(providerPanel),
+        });
         const container = new Container();
         container.addChild(new Text(theme.fg("accent", theme.bold(`pi-usage settings — ${scope}`)), 1, 1));
         const list = new SettingsList(
@@ -290,7 +331,7 @@ export default function (pi: ExtensionAPI) {
           8,
           getSettingsListTheme(),
           (id, value) => {
-            changed = true;
+            if (id === "providers") return; // the drill-down applies its own changes
             if (value === "inherit") {
               delete file[id as keyof UsageSettingsFile];
             } else if (id === "footerFormat") {
@@ -304,12 +345,7 @@ export default function (pi: ExtensionAPI) {
             } else if (id === "resetThresholdPercent") {
               file.resetThresholdPercent = Number.parseInt(value, 10);
             }
-            const settings = project
-              ? mergeUsageSettings(loaded.global, file)
-              : mergeUsageSettings(file, loaded.project);
-            showCacheReadPercent = settings.showSessionBar;
-            updateTokenStatus(ctx);
-            monitor.setSettings(settings);
+            applySettings();
           },
           () => done(undefined),
         );

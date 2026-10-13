@@ -49,6 +49,29 @@ Non-blocking notices require a confirmed available reset and an identified
 5-hour window below the remaining threshold, cover the active provider only,
 and are suppressed after one notice per credential/session and while `/usage`
 is open. Existing footer-off and offline networking rules remain unchanged.
+Per-provider switches live under a `providers` map in both scopes with
+entry-level field merging (`poll`, `refreshAfterTurn`, `disabled`); a fully
+`disabled` provider performs no requests ever and is absent from the footer
+and `/usage` tabs entirely, never rendered as a deferred or stale state.
+`/usage-settings` edits them through a Providers row that drills into a
+provider list and a per-provider panel (Report usage, Timed refresh, Refresh
+after turn); logic lives in `src/provider-settings-ui.ts`.
+
+Cross-instance quota refreshes coordinate through per-account timing files in
+the agent dir (`pi-usage-state/<provider>-<hash>.json`): per provider +
+persistent-salted credential fingerprint they record only `lastRefreshAt`,
+`backoffUntil`, and failure counts — never usage data or credentials (raw keys
+and fingerprints must never appear in any persisted artifact). A matching
+`.lock` file (exclusive create, owner token, 45 s staleness takeover) is held
+across the whole refresh: state is read after acquiring it and written
+(atomic rename) before releasing it, and release only removes a lock that
+still carries the owner's token. Waiting claims poll up to 8 s. The lock
+serializes same-account refreshes across running
+instances; shared backoff is honored by every trigger including manual,
+auto triggers skip when any instance captured within the last 60 s, and
+coordination failures degrade to per-instance behavior without blocking or
+failing a refresh. Coordination is wired only in the extension entry point,
+so tests keep the default uncoordinated monitor.
 
 GitHub Copilot (`github-copilot`) reports the main allowance only,
 percentage-based, from the undocumented `api.github.com/copilot_internal/user`

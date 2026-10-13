@@ -5,6 +5,18 @@ import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 export type FooterFormat = "full" | "compact" | "off";
 export type PollIntervalMinutes = 0 | 1 | 5 | 15 | 30;
 
+/** Per-provider reporting switches (provider id keys). */
+export interface ProviderUsageSettings {
+  /** Exclude this provider from the timed poll (false disables). */
+  poll?: boolean;
+  /** Exclude this provider from the after-turn (agent_settled) refresh. */
+  refreshAfterTurn?: boolean;
+  /** Fully disabled: no requests ever; hidden from the footer and /usage. */
+  disabled?: boolean;
+}
+
+export type ProviderUsageSettingsMap = { [providerId: string]: ProviderUsageSettings };
+
 export interface UsageSettings {
   footerFormat: FooterFormat;
   pollIntervalMinutes: PollIntervalMinutes;
@@ -13,6 +25,7 @@ export interface UsageSettings {
   showSessionBar: boolean;
   /** Notify below this remaining 5-hour percentage; zero disables notices. */
   resetThresholdPercent: number;
+  providers?: ProviderUsageSettingsMap;
 }
 
 export type UsageSettingsFile = Partial<UsageSettings>;
@@ -29,7 +42,8 @@ export const SETTINGS_FILENAME = "pi-usage.json";
 const MAX_SETTINGS_BYTES = 64 * 1024;
 const FOOTER_FORMATS = new Set<FooterFormat>(["full", "compact", "off"]);
 const POLL_INTERVALS = new Set<PollIntervalMinutes>([0, 1, 5, 15, 30]);
-const KNOWN_KEYS = new Set<keyof UsageSettings>(["footerFormat", "pollIntervalMinutes", "refreshAfterTurn", "showSessionBar", "resetThresholdPercent"]);
+const PROVIDER_SETTINGS_KEYS = new Set<keyof ProviderUsageSettings>(["poll", "refreshAfterTurn", "disabled"]);
+const KNOWN_KEYS = new Set<keyof UsageSettings>(["footerFormat", "pollIntervalMinutes", "refreshAfterTurn", "showSessionBar", "resetThresholdPercent", "providers"]);
 
 export interface UsageSettingsPaths {
   global: string;
@@ -52,7 +66,25 @@ export function usageSettingsPaths(cwd: string, agentDir = getAgentDir()): Usage
 }
 
 export function mergeUsageSettings(global: UsageSettingsFile, project: UsageSettingsFile = {}): UsageSettings {
-  return { ...DEFAULT_USAGE_SETTINGS, ...global, ...project };
+  return {
+    ...DEFAULT_USAGE_SETTINGS,
+    ...global,
+    ...project,
+    // Per-provider entries merge field-by-field so a project override can
+    // flip one switch without erasing the rest of the global entry.
+    providers: mergedProviderSettings(global.providers, project.providers),
+  };
+}
+
+function mergedProviderSettings(
+  global: ProviderUsageSettingsMap | undefined,
+  project: ProviderUsageSettingsMap | undefined,
+): ProviderUsageSettingsMap {
+  const merged: ProviderUsageSettingsMap = {};
+  for (const providerId of new Set([...Object.keys(global ?? {}), ...Object.keys(project ?? {})])) {
+    merged[providerId] = { ...global?.[providerId], ...project?.[providerId] };
+  }
+  return merged;
 }
 
 export function parseUsageSettings(value: unknown, scope: "global" | "project"): {
@@ -79,6 +111,35 @@ export function parseUsageSettings(value: unknown, scope: "global" | "project"):
       settings.pollIntervalMinutes = input.pollIntervalMinutes as PollIntervalMinutes;
     } else {
       warnings.push(`Ignoring invalid ${scope} setting "pollIntervalMinutes"`);
+    }
+  }
+  if (input.providers !== undefined) {
+    const rawProviders = input.providers;
+    if (typeof rawProviders === "object" && rawProviders !== null && !Array.isArray(rawProviders)) {
+      const providers: ProviderUsageSettingsMap = {};
+      for (const [providerId, rawEntry] of Object.entries(rawProviders as Record<string, unknown>)) {
+        if (typeof rawEntry !== "object" || rawEntry === null || Array.isArray(rawEntry)) {
+          warnings.push(`Ignoring invalid ${scope} provider settings for "${providerId}"`);
+          continue;
+        }
+        const entry: ProviderUsageSettings = {};
+        const raw = rawEntry as Record<string, unknown>;
+        for (const key of Object.keys(raw)) {
+          if (!PROVIDER_SETTINGS_KEYS.has(key as keyof ProviderUsageSettings)) {
+            warnings.push(`Ignoring unknown ${scope} provider setting "${key}" for "${providerId}"`);
+            continue;
+          }
+          if (typeof raw[key] !== "boolean") {
+            warnings.push(`Ignoring invalid ${scope} provider setting "${key}" for "${providerId}"`);
+            continue;
+          }
+          entry[key as keyof ProviderUsageSettings] = raw[key] as boolean;
+        }
+        if (Object.keys(entry).length > 0) providers[providerId] = entry;
+      }
+      if (Object.keys(providers).length > 0) settings.providers = providers;
+    } else {
+      warnings.push(`Ignoring invalid ${scope} setting "providers"`);
     }
   }
   if (input.refreshAfterTurn !== undefined) {

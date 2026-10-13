@@ -350,6 +350,7 @@ import {
   type MonitorSession,
 } from "../src/refresh.ts";
 import type { GetJson } from "../src/http.ts";
+import type { SharedClaim, SharedCoordination, SharedOutcome, SharedView } from "../src/coordination.ts";
 import type { UsageSettings } from "../src/settings.ts";
 import type { QuotaAdapter, QuotaWindow } from "../src/types.ts";
 
@@ -391,6 +392,7 @@ function monitorEnv(options: {
   configured?: string[];
   makeWindows?: (now: number) => QuotaWindow[];
   settings?: UsageSettings;
+  coordination?: FakeCoordination;
 } = {}): MonitorEnv {
   const responses = options.responses ?? [{ status: 200, data: {} }];
   const configured = new Set(options.configured ?? ["opencode-go", "openrouter"]);
@@ -419,7 +421,12 @@ function monitorEnv(options: {
     mode: "tui",
     setStatus: (key, text) => statusCalls.push({ key, text }),
   };
-  const monitor = new UsageMonitor({ adapters, createRequester: () => getJson, ...(options.settings ? { settings: options.settings } : {}) });
+  const monitor = new UsageMonitor({
+    adapters,
+    createRequester: () => getJson,
+    ...(options.settings ? { settings: options.settings } : {}),
+    ...(options.coordination ? { coordination: options.coordination } : {}),
+  });
   return {
     monitor,
     session,
@@ -815,6 +822,157 @@ test("monitor: refresh and cached-result validation share the OAuth-origin routi
     assert.equal(calls.length, 1, "refresh accepted the OAuth routing origin");
     assert.ok(await monitor.serveCached("github-copilot"), "cache validation applies the same policy");
     monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// ------------------------------------------------------- provider reporting
+
+test("monitor: a disabled provider performs no networking and clears its footer", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const env = monitorEnv({
+      settings: { footerFormat: "full", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 10,
+        providers: { "opencode-go": { disabled: true } } },
+    });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    mock.timers.tick(POLL_INTERVAL_MS * 2);
+    await drain();
+    await env.monitor.onAgentSettled();
+    assert.equal(env.calls.length, 0, "disabled provider never fetches");
+    assert.ok(await env.monitor.serveCached("opencode-go") === undefined);
+    const manual = await env.monitor.refreshProvider(env.adapters[0]!);
+    assert.equal(manual.error?.message, "Reporting is disabled for this provider");
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: per-provider switches disable timed poll or after-turn refresh independently", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const noPoll = monitorEnv({
+      settings: { footerFormat: "full", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 10,
+        providers: { "opencode-go": { poll: false } } },
+    });
+    noPoll.monitor.startSession(noPoll.session, "opencode-go");
+    await drain();
+    mock.timers.tick(POLL_INTERVAL_MS);
+    await drain();
+    assert.equal(noPoll.calls.length, 1, "initial refresh happened, poll skipped");
+    noPoll.monitor.shutdown();
+
+    const noTurn = monitorEnv({
+      settings: { footerFormat: "full", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 10,
+        providers: { "opencode-go": { refreshAfterTurn: false } } },
+    });
+    noTurn.monitor.startSession(noTurn.session, "opencode-go");
+    await drain();
+    mock.timers.tick(EVENT_MIN_AGE_MS + 1_000);
+    await noTurn.monitor.onAgentSettled();
+    assert.equal(noTurn.calls.length, 1, "settled refresh skipped per provider");
+    noTurn.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// --------------------------------------------------- shared coordination
+
+class FakeCoordination {
+  readonly state = new Map<string, SharedView>();
+  acquired = true;
+  claims = 0;
+  outcomes: Array<SharedOutcome | undefined> = [];
+
+  async claim(providerId: string, apiKey: string): Promise<SharedClaim> {
+    this.claims++;
+    const key = `${providerId}:${apiKey}`;
+    const view = this.state.get(key) ?? {};
+    const release = (outcome?: SharedOutcome): Promise<void> => {
+      this.outcomes.push(outcome);
+      if (outcome?.lastRefreshAt !== undefined) {
+        this.state.set(key, { lastRefreshAt: outcome.lastRefreshAt, backoffUntil: 0, failures: 0 });
+      } else if (outcome?.backoffUntil !== undefined) {
+        this.state.set(key, { ...this.state.get(key), backoffUntil: outcome.backoffUntil, failures: outcome.failures });
+      }
+      return Promise.resolve();
+    };
+    return Promise.resolve({ view, acquired: this.acquired, degraded: false, release });
+  }
+}
+
+test("monitor: shared backoff from another instance defers every trigger", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const shared = new FakeCoordination();
+    shared.state.set("opencode-go:key-1", { backoffUntil: 60_000, failures: 2, lastRefreshAt: 0 });
+    const env = monitorEnv({ responses: [{ status: 200, data: {} }], coordination: shared });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.equal(env.calls.length, 0, "no fetch while the shared backoff holds");
+    assert.match(lastStatus(env)!.text!, /retry 1m/, "footer shows the shared retry window");
+
+    const manual = await env.monitor.refreshProvider(env.adapters[0]!);
+    assert.equal(manual.error?.message, "Refresh deferred: provider backoff active");
+    assert.equal(env.calls.length, 0);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: success and failure outcomes are recorded back to the shared slot", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const shared = new FakeCoordination();
+    const env = monitorEnv({ responses: [{ status: 200, data: {} }], coordination: shared });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.equal(env.calls.length, 1);
+    const success = shared.outcomes[0];
+    assert.ok(success?.lastRefreshAt !== undefined, "successful refresh recorded");
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const shared = new FakeCoordination();
+    const env = monitorEnv({ responses: [{ status: 429, data: {}, retryAfterMs: 60_000 }], coordination: shared });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.equal(env.calls.length, 1);
+    const failure = shared.outcomes[0];
+    assert.ok((failure?.backoffUntil ?? 0) >= 60_000, "server Retry-After is shared as backoff");
+    assert.equal(failure?.failures, 1);
+    env.monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: settled refresh skips when another instance captured moments ago", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const shared = new FakeCoordination();
+    const env = monitorEnv({ coordination: shared });
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.equal(env.calls.length, 1, "session fill proceeds; outcome recorded");
+    const recorded = shared.state.get("opencode-go:key-1")!;
+    assert.ok(recorded.lastRefreshAt !== undefined);
+
+    shared.state.set("opencode-go:key-1", { ...recorded, lastRefreshAt: EVENT_MIN_AGE_MS + 1_000 });
+    mock.timers.tick(EVENT_MIN_AGE_MS + 2_000);
+    await env.monitor.onAgentSettled();
+    assert.equal(env.calls.length, 1, "another session refreshed this provider seconds ago; skip");
+    assert.ok(await env.monitor.serveCached("opencode-go"), "own cached data still served");
+    env.monitor.shutdown();
   } finally {
     mock.timers.reset();
   }

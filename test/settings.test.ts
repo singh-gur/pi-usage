@@ -21,6 +21,7 @@ test("settings: defaults and project overrides merge without mutation", () => {
     refreshAfterTurn: false,
     showSessionBar: true,
     resetThresholdPercent: 10,
+    providers: {},
   });
   assert.deepEqual(DEFAULT_USAGE_SETTINGS, {
     footerFormat: "full",
@@ -69,6 +70,7 @@ test("settings: global and trusted project files load with project precedence", 
       refreshAfterTurn: false,
       showSessionBar: false,
       resetThresholdPercent: 10,
+      providers: {},
     });
     assert.deepEqual(trusted.warnings, []);
 
@@ -79,6 +81,7 @@ test("settings: global and trusted project files load with project precedence", 
       refreshAfterTurn: true,
       showSessionBar: true,
       resetThresholdPercent: 10,
+      providers: {},
     });
     assert.deepEqual(untrusted.project, {});
   } finally {
@@ -100,9 +103,44 @@ test("settings: save creates readable JSON and malformed files fall back safely"
 
     await writeFile(paths.global, "{not json", "utf8");
     const loaded = await loadUsageSettings(cwd, true, agentDir);
-    assert.deepEqual(loaded.settings, DEFAULT_USAGE_SETTINGS);
+    assert.deepEqual(loaded.settings, { ...DEFAULT_USAGE_SETTINGS, providers: {} });
     assert.deepEqual(loaded.warnings, ["Ignoring global pi-usage.json: invalid JSON"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("settings: providers map parses valid entries and rejects malformed ones", () => {
+  const parsed = parseUsageSettings({
+    providers: {
+      codex: { poll: false, disabled: true },
+      grok: { refreshAfterTurn: false },
+      bad: "off",
+      kimi: { disabled: "yes" },
+      zai: { poll: true, unknown: 1 },
+    },
+  }, "global");
+  assert.deepEqual(parsed.settings.providers, {
+    codex: { poll: false, disabled: true },
+    grok: { refreshAfterTurn: false },
+    zai: { poll: true },
+  });
+  assert.equal(parsed.warnings.length, 3);
+  assert.ok(parsed.warnings.some((w) => w.includes('"bad"')));
+  assert.ok(parsed.warnings.some((w) => w.includes('"kimi"')));
+  assert.ok(parsed.warnings.some((w) => w.includes('"zai"') && w.includes("unknown")));
+
+  assert.deepEqual(parseUsageSettings({ providers: [] }, "global"), { settings: {}, warnings: [`Ignoring invalid global setting "providers"`] });
+  assert.deepEqual(parseUsageSettings({ providers: 7 }, "project"), { settings: {}, warnings: [`Ignoring invalid project setting "providers"`] });
+  assert.deepEqual(parseUsageSettings({}, "global").settings, {});
+});
+
+test("settings: provider entries merge field-by-field with project precedence", () => {
+  const global = { providers: { codex: { poll: false, refreshAfterTurn: false }, grok: { disabled: true } } };
+  const project = { providers: { codex: { refreshAfterTurn: true }, newp: { disabled: true } } };
+  const mergedBoth = mergeUsageSettings(global, project);
+  assert.deepEqual(mergedBoth.providers?.codex, { poll: false, refreshAfterTurn: true }, "project flips one switch without erasing the rest");
+  assert.deepEqual(mergedBoth.providers?.grok, { disabled: true });
+  assert.deepEqual(mergedBoth.providers?.newp, { disabled: true });
+  assert.deepEqual(mergeUsageSettings({}, {}).providers, {});
 });

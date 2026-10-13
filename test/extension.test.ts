@@ -146,7 +146,8 @@ const GO_BODY = JSON.stringify({
 });
 const OR_BODY = JSON.stringify({ data: { limit: 100, limit_remaining: 74.5, limit_reset: "monthly", usage: 25.5 } });
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+// Generous: refreshes include real coordination file I/O in these integration tests.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
 
 // ------------------------------------------------------------------- tests
 
@@ -1355,3 +1356,53 @@ for (const decision of ["cancel-selection", "cancel-confirmation", "consume"] as
     }
   });
 }
+
+test("extension: /usage-settings provider drill-down edits one provider and saves it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-extension-"));
+  try {
+    const harness = setupExtension();
+    const { ctx, handles } = makeCtx({
+      mode: "tui",
+      cwd: root,
+      projectTrusted: true,
+      selections: ["Project"],
+      configured: { "openai-codex": true },
+      authByKey: { "openai-codex": "k" },
+      activeProvider: "openai-codex",
+    });
+    const handler = harness.commands.get("usage-settings")!.handler("", ctx);
+    await settle();
+    const ui = handles[0]!.component;
+    const text = () => ui.render(100).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(text(), /Providers\s+all default/);
+
+    for (let i = 0; i < 5; i++) ui.handleInput("\x1b[B"); // down to the Providers row
+    ui.handleInput("\r");
+    const list = text();
+    assert.doesNotMatch(list, /Providers\s+all default/, "the provider list replaces the main list");
+    assert.ok(list.indexOf("OpenAI Codex") < list.indexOf("OpenCode Go"), "the active provider is listed first");
+    assert.match(list, /not configured/, "unconfigured providers are marked");
+
+    ui.handleInput("\r"); // open the first provider (the active one)
+    const panelText = text();
+    assert.match(panelText, /Providers › OpenAI Codex/);
+    assert.equal((panelText.match(/pi-usage settings/g) ?? []).length, 1, "headers do not stack");
+    assert.match(panelText, /Report usage\s+inherit/);
+    assert.match(panelText, /Timed refresh/);
+    assert.match(panelText, /Refresh after turn/);
+    ui.handleInput("\r"); // inherit -> on
+    ui.handleInput("\r"); // on -> off  (Report usage off)
+    ui.handleInput("\x1b"); // back to the provider list
+    assert.match(text(), /hidden · no requests/);
+    ui.handleInput("\x1b"); // back to the main list
+    assert.match(text(), /Providers\s+1 customized/);
+    ui.handleInput("\x1b"); // close
+    await handler;
+
+    const saved = JSON.parse(await readFile(join(root, ".pi", "pi-usage.json"), "utf8"));
+    assert.equal(Object.values(saved.providers).length, 1);
+    assert.deepEqual(Object.values(saved.providers)[0], { disabled: true });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

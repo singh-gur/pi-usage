@@ -17,10 +17,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AuthGateway } from "./auth.ts";
 import { resolveQuotaAuth } from "./auth.ts";
+import type { SharedClaim, SharedCoordination } from "./coordination.ts";
 import { bounded, createGetJson, createPostJson, DEFAULT_HTTP_LIMITS, isOffline, type GetJson, type PostJson } from "./http.ts";
 import { attachResets, availableResetOffers, lowQuotaResetAvailable } from "./resets.ts";
 import { UsageError, type ProviderError, type ProviderUsage, type QuotaAdapter, type ResetOffer } from "./types.ts";
-import { DEFAULT_USAGE_SETTINGS, type UsageSettings } from "./settings.ts";
+import { DEFAULT_USAGE_SETTINGS, type ProviderUsageSettings, type UsageSettings } from "./settings.ts";
 import { formatFooterError, formatFooterText } from "./ui.ts";
 
 export const STATUS_KEY = "usage";
@@ -31,6 +32,8 @@ export const EVENT_MIN_AGE_MS = 60_000;
 const PROVIDER_BOUND_MS = 30_000;
 const BACKOFF_BASE_MS = 30_000;
 const BACKOFF_MAX_MS = 5 * 60_000;
+/** Auto triggers skip when another running instance refreshed this account within this window. */
+const SHARED_FRESH_MS = 60_000;
 
 /** Sanitized error result wrapper shared with the command view. */
 export function errorUsage(adapter: QuotaAdapter, error: UsageError, capturedAt: number): ProviderUsage {
@@ -69,6 +72,8 @@ export interface UsageMonitorOptions {
   createRequester?(signal: AbortSignal): GetJson;
   createResetRequester?(signal: AbortSignal): PostJson;
   settings?: UsageSettings;
+  /** Cross-instance timing/backoff sharing; absent keeps per-instance behavior. */
+  coordination?: SharedCoordination;
 }
 
 interface CacheEntry {
@@ -97,6 +102,7 @@ export class UsageMonitor {
   private readonly now: () => number;
   private readonly createRequester: (signal: AbortSignal) => GetJson;
   private settings: UsageSettings;
+  private readonly coordination: SharedCoordination | undefined;
   private readonly createResetRequester: (signal: AbortSignal) => PostJson;
   private readonly resetting = new Set<string>();
   private readonly attemptedResets = new Set<string>();
@@ -122,11 +128,21 @@ export class UsageMonitor {
     this.now = options.now ?? (() => Date.now());
     this.createRequester = options.createRequester ?? ((signal) => createGetJson(DEFAULT_HTTP_LIMITS, signal));
     this.settings = options.settings ?? { ...DEFAULT_USAGE_SETTINGS };
+    this.coordination = options.coordination;
     this.createResetRequester = options.createResetRequester ?? ((signal) => createPostJson(DEFAULT_HTTP_LIMITS, signal));
   }
 
   get hasSession(): boolean {
     return this.session !== undefined;
+  }
+
+  /** True when the provider's reporting is fully disabled by settings. */
+  isReportingDisabled(providerId: string): boolean {
+    return this.providerEntry(providerId).disabled === true;
+  }
+
+  private providerEntry(providerId: string): ProviderUsageSettings {
+    return this.settings.providers?.[providerId] ?? {};
   }
 
   /** Apply settings immediately, updating the footer and poll schedule in place. */
@@ -201,6 +217,8 @@ export class UsageMonitor {
     if (!this.settings.refreshAfterTurn || !this.autoNetworkingAllowed()) return;
     const providerId = this.activeProviderId;
     if (providerId === undefined) return;
+    const entry = this.providerEntry(providerId);
+    if (entry.disabled || entry.refreshAfterTurn === false) return;
     const cached = await this.serveCached(providerId);
     if (cached !== undefined) {
       const now = this.now();
@@ -350,7 +368,8 @@ export class UsageMonitor {
   private async pollTick(): Promise<void> {
     try {
       const providerId = this.activeProviderId;
-      if (this.autoNetworkingAllowed() && providerId !== undefined) {
+      const entry = providerId !== undefined ? this.providerEntry(providerId) : undefined;
+      if (this.autoNetworkingAllowed() && providerId !== undefined && !entry?.disabled && entry?.poll !== false) {
         await this.refresh(providerId, "poll");
       }
     } finally {
@@ -395,9 +414,12 @@ export class UsageMonitor {
         error: { kind: "canceled", message: "No active session for this provider" },
       });
     }
+    if (this.isReportingDisabled(providerId)) {
+      return Promise.resolve(errorUsage(adapter, new UsageError("canceled", "Reporting is disabled for this provider"), this.now()));
+    }
 
     const generation = this.generation;
-    const promise = this.runRefresh(adapter, session, generation);
+    const promise = this.runRefresh(adapter, session, generation, trigger);
     this.inFlight.set(providerId, promise);
     return promise.finally(() => {
       if (this.inFlight.get(providerId) === promise) this.inFlight.delete(providerId);
@@ -408,6 +430,7 @@ export class UsageMonitor {
     adapter: QuotaAdapter,
     session: MonitorSession,
     generation: number,
+    trigger: "session" | "model" | "settled" | "poll" | "command",
   ): Promise<ProviderUsage> {
     const adapterId = adapter.id;
     if (isOffline()) {
@@ -428,6 +451,9 @@ export class UsageMonitor {
     // The caller may give up on this refresh (per-provider 30s bound); late
     // completions must not touch cache or footer.
     let callerGaveUp = false;
+    // Cross-instance slot: claimed (or refused) after auth resolution, before
+    // the request; coordination failures never fail or delay the refresh.
+    let shared: SharedClaim | undefined;
     const work = async (): Promise<ProviderUsage> => {
       const auth = await resolveQuotaAuth(session.gateway, adapterId, adapter.officialOrigin, adapter.allowedProviderOrigin, adapter.allowedOAuthOrigins);
       if (auth instanceof UsageError) {
@@ -435,6 +461,23 @@ export class UsageMonitor {
         return errorUsage(adapter, auth, this.now());
       }
       const fingerprint = this.fingerprintOf(auth.apiKey);
+      try {
+        shared = this.coordination ? await this.coordination.claim(adapterId, auth.apiKey) : undefined;
+      } catch {
+        shared = undefined;
+      }
+      const refusal = this.sharedRefusal(adapterId, shared, trigger);
+      if (refusal !== undefined) {
+        const cached = await this.serveCached(adapterId);
+        await shared?.release();
+        if (this.generation === generation && !callerGaveUp) {
+          this.lastError.set(adapterId, { kind: "canceled", message: refusal });
+          void this.renderFooter();
+        }
+        return cached !== undefined
+          ? cached
+          : errorUsage(adapter, new UsageError("canceled", refusal), this.now());
+      }
       // Capture server retry guidance from non-2xx responses without
       // touching adapter contracts.
       let retryAfterMs: number | undefined;
@@ -448,6 +491,10 @@ export class UsageMonitor {
       };
       try {
         const usage = await attachResets(adapter, auth, getJson, await adapter.fetchQuota(auth, getJson));
+        // Awaited so the slot is free before this refresh resolves; release never throws.
+        const claim = shared;
+        shared = undefined;
+        await claim?.release({ lastRefreshAt: usage.capturedAt });
         if (callerGaveUp || this.generation !== generation) return usage; // obsolete
         this.backoff.delete(adapterId);
         this.lastError.delete(adapterId);
@@ -467,8 +514,14 @@ export class UsageMonitor {
         if (this.generation === generation && !callerGaveUp) {
           // Canceled means our own abort (shutdown); no failure to back off from.
           if (usageError.kind !== "canceled") this.noteFailure(adapterId, retryAfterMs);
+          const failed = this.backoff.get(adapterId);
+          await shared?.release(failed !== undefined
+            ? { backoffUntil: failed.until, failures: failed.failures }
+            : undefined);
           this.lastError.set(adapterId, { kind: usageError.kind, message: usageError.message });
           void this.renderFooter();
+        } else {
+          await shared?.release();
         }
         return errorUsage(adapter, usageError, this.now());
       }
@@ -480,11 +533,51 @@ export class UsageMonitor {
       const usageError = error instanceof UsageError ? error : new UsageError("request", "Provider refresh failed");
       if (this.generation === generation) {
         this.noteFailure(adapterId, undefined);
+        const failed = this.backoff.get(adapterId);
+        await shared?.release(failed !== undefined
+          ? { backoffUntil: failed.until, failures: failed.failures }
+          : undefined);
         this.lastError.set(adapterId, { kind: usageError.kind, message: usageError.message });
         void this.renderFooter();
+      } else {
+        await shared?.release();
       }
       return errorUsage(adapter, usageError, this.now());
     }
+  }
+
+  /** Refusal message when shared state or another instance disallows a fetch. */
+  private sharedRefusal(
+    adapterId: string,
+    shared: SharedClaim | undefined,
+    trigger: "session" | "model" | "settled" | "poll" | "command",
+  ): string | undefined {
+    if (shared === undefined || shared.degraded) {
+      // Without coordination, mirror only our own state: no refusal here.
+      return undefined;
+    }
+    const now = this.now();
+    // Backoff recorded by any running instance is honored by every trigger.
+    if (shared.view.backoffUntil !== undefined && shared.view.backoffUntil > now) {
+      const back = this.backoff.get(adapterId) ?? { until: 0, failures: 0 };
+      if (back.until < shared.view.backoffUntil) {
+        back.until = shared.view.backoffUntil;
+        if (shared.view.failures !== undefined && shared.view.failures > back.failures) {
+          back.failures = shared.view.failures;
+        }
+        this.backoff.set(adapterId, back);
+      }
+      return "Refresh deferred: provider backoff active";
+    }
+    // Another instance is mid-refresh on this account; never double-hit.
+    if (!shared.acquired) return "Refresh deferred: another session is refreshing this provider";
+    // Auto triggers skip when any instance captured data moments ago; manual
+    // and session/model fills always go through.
+    const freshWindow = trigger === "settled" || trigger === "poll" ? SHARED_FRESH_MS : 0;
+    if (freshWindow > 0 && shared.view.lastRefreshAt !== undefined && now - shared.view.lastRefreshAt < freshWindow) {
+      return "Refresh deferred: another session refreshed this provider";
+    }
+    return undefined;
   }
 
   /** Exponential backoff for automatic failures; valid server guidance is the floor. */
@@ -505,7 +598,8 @@ export class UsageMonitor {
     }
     const providerId = this.activeProviderId;
     const adapter = providerId !== undefined ? this.adapterById.get(providerId) : undefined;
-    if (adapter === undefined || providerId === undefined || !session.gateway.isConfigured(providerId)) {
+    if (adapter === undefined || providerId === undefined || !session.gateway.isConfigured(providerId)
+      || this.isReportingDisabled(providerId)) {
       session.setStatus(STATUS_KEY, undefined);
       return;
     }
