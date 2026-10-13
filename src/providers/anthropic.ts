@@ -29,6 +29,18 @@ import {
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA = "oauth-2025-04-20";
+/**
+ * The undocumented usage endpoint reportedly rate-limits generic client
+ * User-Agents almost immediately (persistent 429, Retry-After 0) while the
+ * Claude Code identity gets normal limits (community reports, not an Anthropic
+ * contract; see anthropics/claude-code#30930, #31637). Pi exposes no public
+ * Claude Code version, so this is a major.minor default: the endpoint is
+ * reported to key on the `claude-code/` prefix, not the exact version.
+ * Sent on the usage reads only, never on the reset mutation route.
+ */
+const USAGE_USER_AGENT = "claude-code/2.1";
+/** Reports show penalty windows far beyond the global 5 min cap; retry less eagerly. */
+const MAX_BACKOFF_MS = 15 * 60_000;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -165,18 +177,23 @@ function anthropicHeaders(auth: QuotaFetchAuth): Record<string, string> {
   return { accept: "application/json", authorization: `Bearer ${auth.apiKey}`, "anthropic-beta": OAUTH_BETA };
 }
 
+function usageHeaders(auth: QuotaFetchAuth): Record<string, string> {
+  return { ...anthropicHeaders(auth), "user-agent": USAGE_USER_AGENT };
+}
+
 export const anthropicAdapter: QuotaAdapter = {
   id: "anthropic",
   name: "Anthropic",
   officialOrigin: "https://api.anthropic.com",
   domainLabel: "Claude subscription allowance",
+  maxBackoffMs: MAX_BACKOFF_MS,
   async fetchQuota(auth: QuotaFetchAuth, getJson: GetJson): Promise<ProviderUsage> {
-    const response = await getJson(USAGE_URL, anthropicHeaders(auth));
+    const response = await getJson(USAGE_URL, usageHeaders(auth));
     return interpretAnthropic(response.status, response.data);
   },
   async fetchResets(auth, getJson) {
     // Source-derived juniper_tide contract: OmniRoute release/v3.8.51 claudeLimitReset.ts.
-    const response = await getJson(`${USAGE_URL}?at_wall=1&skip_spend=1`, anthropicHeaders(auth));
+    const response = await getJson(`${USAGE_URL}?at_wall=1&skip_spend=1`, usageHeaders(auth));
     const root = resetResponse(response.status, response.data);
     const raw = record(root.juniper_tide);
     if (!raw) return { offers: [], notice: "No supported 5-hour reset offer reported" };

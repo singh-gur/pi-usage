@@ -25,13 +25,27 @@ export async function attachResets(adapter: QuotaAdapter, auth: QuotaFetchAuth,
   return usage;
 }
 
-/** Only an explicitly identified 5-hour window can trigger a notice. */
-export function lowQuotaResetAvailable(usage: ProviderUsage, threshold: number, now = Date.now()): boolean {
-  if (usage.error || threshold <= 0 || !usage.resets) return false;
-  const available = availableResetOffers(usage.resets.offers, now).length > 0
-    || (usage.providerId === "zai" && (usage.resets.availableCount ?? 0) > 0);
-  return available && usage.windows.some((window) => window.durationSeconds === 18_000
+/** Only an explicitly identified 5-hour window below the remaining threshold qualifies. */
+function lowFiveHourWindow(usage: ProviderUsage, threshold: number, now: number): boolean {
+  return threshold > 0 && usage.windows.some((window) => window.durationSeconds === 18_000
     && window.usedPercent !== undefined && window.usedPercent >= 0 && window.usedPercent <= 100
     && 100 - window.usedPercent < threshold
     && (window.resetsAt === undefined || window.resetsAt > now));
+}
+
+/**
+ * Whether an automatic refresh needs the reset inventory: only the low-quota
+ * notice consumes it, and only when the 5-hour window is below the threshold.
+ * Skipping it otherwise halves requests to rate-limited usage endpoints.
+ * Manual /usage refreshes always fetch it (the view and the reset action use it).
+ */
+export function resetInventoryWanted(usage: ProviderUsage, threshold: number, now = Date.now()): boolean {
+  return lowFiveHourWindow(usage, threshold, now);
+}
+
+export function lowQuotaResetAvailable(usage: ProviderUsage, threshold: number, now = Date.now()): boolean {
+  if (usage.error || !usage.resets) return false;
+  const available = availableResetOffers(usage.resets.offers, now).length > 0
+    || (usage.providerId === "zai" && (usage.resets.availableCount ?? 0) > 0);
+  return available && lowFiveHourWindow(usage, threshold, now);
 }

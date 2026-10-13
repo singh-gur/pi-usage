@@ -117,6 +117,8 @@ export interface QuotaAdapter {
    */
   allowedOAuthOrigins?: readonly string[];
   domainLabel: string;
+  /** Provider-specific cap on automatic failure backoff; defaults to the monitor's 5 min. */
+  maxBackoffMs?: number;
   fetchQuota(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ProviderUsage>;
   fetchResets?(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ResetAvailability>;
   redeemReset?(auth: QuotaFetchAuth, offer: ResetOffer, getJson: QuotaRequester,

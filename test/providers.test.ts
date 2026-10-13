@@ -1071,6 +1071,7 @@ test("anthropic: adapter sends bearer auth with the OAuth beta header", async ()
   assert.equal(calls[0]!.url, "https://api.anthropic.com/api/oauth/usage");
   assert.equal(calls[0]!.headers.authorization, "Bearer sk-ant-oauth");
   assert.equal(calls[0]!.headers["anthropic-beta"], "oauth-2025-04-20");
+  assert.equal(calls[0]!.headers["user-agent"], "claude-code/2.1", "usage reads present the Claude Code identity");
   assert.equal(result.providerId, "anthropic");
 });
 

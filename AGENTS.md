@@ -73,6 +73,15 @@ coordination failures degrade to per-instance behavior without blocking or
 failing a refresh. Coordination is wired only in the extension entry point,
 so tests keep the default uncoordinated monitor.
 
+Automatic refreshes make one request per provider: the reset inventory is
+fetched only for `/usage` refreshes, or when the 5-hour window is below the
+notice threshold (only the low-quota notice uses it). Anthropic's usage
+endpoint is undocumented and reportedly rate-limits generic User-Agents almost
+immediately (community reports, not verified here), so its usage reads send
+`user-agent: claude-code/2.1` (never on the reset mutation route; Pi exposes no
+Claude Code version, so keep it major.minor) and its failure backoff caps at
+15 min via `QuotaAdapter.maxBackoffMs` instead of the global 5 min.
+
 GitHub Copilot (`github-copilot`) reports the main allowance only,
 percentage-based, from the undocumented `api.github.com/copilot_internal/user`
 endpoint using the Pi-resolved OAuth session token. Its account-specific

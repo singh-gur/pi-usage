@@ -112,8 +112,9 @@ test("resets: Codex uses account-bound headers, selected id, and idempotency key
 
 test("resets: Anthropic requires all eligibility flags and a stable future weekly identity", async () => {
   const block = { eligible: true, arm: "reset", available: true, weekly_resets_at: expires() };
-  const read = (juniper_tide: unknown) => anthropicAdapter.fetchResets!(auth, async (url) => {
+  const read = (juniper_tide: unknown) => anthropicAdapter.fetchResets!(auth, async (url, headers) => {
     assert.match(url, /usage\?at_wall=1&skip_spend=1$/);
+    assert.equal(headers["user-agent"], "claude-code/2.1", "inventory read shares the usage identity");
     return response({ juniper_tide });
   });
   assert.equal((await read(block)).offers.length, 1);
@@ -126,13 +127,15 @@ test("resets: Anthropic requires all eligibility flags and a stable future weekl
 
 test("resets: Anthropic resolves organization publicly and checks business result, not HTTP 200", async () => {
   const offer = { id: "juniper_tide:1", label: "5-hour" };
-  const get: GetJson = async (url) => {
+  const get: GetJson = async (url, headers) => {
     assert.equal(url, "https://api.anthropic.com/api/oauth/profile");
+    assert.equal(headers["user-agent"], undefined, "the inspected reset route keeps its original headers");
     return response({ organization: { uuid: "11111111-2222-3333-4444-555555555555" } });
   };
   const result = await anthropicAdapter.redeemReset!(auth, offer, get, async (url, headers, body) => {
     assert.match(url, /\/organizations\/11111111-2222-3333-4444-555555555555\/reset_rate_limits$/);
     assert.equal(headers["anthropic-beta"], "oauth-2025-04-20");
+    assert.equal(headers["user-agent"], undefined, "no identity header on the mutation");
     assert.deepEqual(body, { program: "juniper_tide" });
     return response({ result: "reset" });
   }, "unused");

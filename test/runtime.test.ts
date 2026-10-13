@@ -977,3 +977,93 @@ test("monitor: settled refresh skips when another instance captured moments ago"
     mock.timers.reset();
   }
 });
+
+// ------------------------------------------------ inventory gating & backoff
+
+function inventoryAdapter(state: { used: number; failing?: boolean; inventoryCalls: number }, maxBackoffMs?: number): QuotaAdapter {
+  return {
+    id: "inv",
+    name: "Inv",
+    officialOrigin: "https://inv.example",
+    domainLabel: "test quota",
+    ...(maxBackoffMs === undefined ? {} : { maxBackoffMs }),
+    async fetchQuota() {
+      if (state.failing) throw new UsageError("request", "HTTP 429");
+      return {
+        providerId: "inv", providerName: "Inv", domainLabel: "test quota", capturedAt: Date.now(),
+        windows: [{ label: "5-hour", durationSeconds: 18_000, usedPercent: state.used, resetsAt: Date.now() + 3_600_000 }],
+      };
+    },
+    async fetchResets() {
+      state.inventoryCalls++;
+      return { offers: [] };
+    },
+  };
+}
+
+function inventorySession(): MonitorSession {
+  return {
+    gateway: { isConfigured: () => true, resolveAuth: async () => ({ auth: { apiKey: "k" } }), providerInfo: () => undefined },
+    mode: "tui",
+    setStatus: () => {},
+  };
+}
+
+test("monitor: automatic refreshes fetch the reset inventory only when the 5-hour window is low; /usage always does", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const state = { used: 50, inventoryCalls: 0 };
+    const adapter = inventoryAdapter(state);
+    const monitor = new UsageMonitor({ adapters: [adapter], createRequester: () => async () => ({ status: 200, data: {} }) });
+    monitor.startSession(inventorySession(), "inv");
+    await drain();
+    assert.equal(state.inventoryCalls, 0, "healthy quota: one request per automatic refresh");
+
+    state.used = 95; // 5% remaining, below the default 10% notice threshold
+    mock.timers.tick(POLL_INTERVAL_MS);
+    await drain();
+    assert.equal(state.inventoryCalls, 1, "low quota: inventory needed for the notice");
+
+    state.used = 10;
+    await monitor.refreshProvider(adapter);
+    assert.equal(state.inventoryCalls, 2, "a manual /usage refresh always includes the inventory");
+
+    monitor.setSettings({ footerFormat: "full", pollIntervalMinutes: 5, refreshAfterTurn: true, showSessionBar: true, resetThresholdPercent: 0 });
+    state.used = 99;
+    mock.timers.tick(POLL_INTERVAL_MS);
+    await drain();
+    assert.equal(state.inventoryCalls, 2, "notices disabled: automatic refreshes never need the inventory");
+    monitor.shutdown();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("monitor: an adapter-specific backoff cap extends the 5 minute default", async () => {
+  const failFiveTimes = async (maxBackoffMs?: number): Promise<string> => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+    try {
+      const state = { used: 0, failing: true, inventoryCalls: 0 };
+      const statuses: Array<string | undefined> = [];
+      const session = inventorySession();
+      session.setStatus = (_key, text) => statuses.push(text);
+      const monitor = new UsageMonitor({
+        adapters: [inventoryAdapter(state, maxBackoffMs)],
+        createRequester: () => async () => ({ status: 200, data: {} }),
+      });
+      monitor.startSession(session, "inv");
+      await drain();
+      for (let i = 0; i < 4; i++) {
+        mock.timers.tick(POLL_INTERVAL_MS);
+        await drain();
+      }
+      monitor.shutdown();
+      return statuses.filter((text) => text !== undefined).pop()!;
+    } finally {
+      mock.timers.reset();
+    }
+  };
+  // Failure 5 backs off 30s * 2^4 = 480s, above the default 300s cap.
+  assert.match(await failFiveTimes(), /retry 5m/, "default cap is 5 minutes");
+  assert.match(await failFiveTimes(15 * 60_000), /retry 8m/, "Anthropic-style cap lets the exponential growth continue");
+});

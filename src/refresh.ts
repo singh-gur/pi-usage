@@ -19,7 +19,7 @@ import type { AuthGateway } from "./auth.ts";
 import { resolveQuotaAuth } from "./auth.ts";
 import type { SharedClaim, SharedCoordination } from "./coordination.ts";
 import { bounded, createGetJson, createPostJson, DEFAULT_HTTP_LIMITS, isOffline, type GetJson, type PostJson } from "./http.ts";
-import { attachResets, availableResetOffers, lowQuotaResetAvailable } from "./resets.ts";
+import { attachResets, availableResetOffers, lowQuotaResetAvailable, resetInventoryWanted } from "./resets.ts";
 import { UsageError, type ProviderError, type ProviderUsage, type QuotaAdapter, type ResetOffer } from "./types.ts";
 import { DEFAULT_USAGE_SETTINGS, type ProviderUsageSettings, type UsageSettings } from "./settings.ts";
 import { formatFooterError, formatFooterText } from "./ui.ts";
@@ -490,7 +490,12 @@ export class UsageMonitor {
         return response;
       };
       try {
-        const usage = await attachResets(adapter, auth, getJson, await adapter.fetchQuota(auth, getJson));
+        const quota = await adapter.fetchQuota(auth, getJson);
+        // Automatic refreshes skip the second (inventory) request unless the
+        // low-quota notice could use it; /usage always gets it.
+        const usage = trigger === "command" || resetInventoryWanted(quota, this.settings.resetThresholdPercent, this.now())
+          ? await attachResets(adapter, auth, getJson, quota)
+          : quota;
         // Awaited so the slot is free before this refresh resolves; release never throws.
         const claim = shared;
         shared = undefined;
@@ -584,7 +589,8 @@ export class UsageMonitor {
   private noteFailure(providerId: string, serverRetryMs: number | undefined): void {
     const back = this.backoff.get(providerId) ?? { until: 0, failures: 0 };
     back.failures++;
-    const exponential = Math.min(BACKOFF_BASE_MS * 2 ** (back.failures - 1), BACKOFF_MAX_MS);
+    const cap = this.adapterById.get(providerId)?.maxBackoffMs ?? BACKOFF_MAX_MS;
+    const exponential = Math.min(BACKOFF_BASE_MS * 2 ** (back.failures - 1), cap);
     back.until = this.now() + Math.max(exponential, serverRetryMs ?? 0);
     this.backoff.set(providerId, back);
   }
