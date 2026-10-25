@@ -78,6 +78,27 @@ test("auth: auth resolution failure is sanitized", async () => {
   assert.ok(!result.message.includes("secret internal detail"));
 });
 
+test("auth: every gateway failure is sanitized, including provider info after awaited auth", async () => {
+  for (const method of ["isConfigured", "resolveAuth", "providerInfo"] as const) {
+    const gw = gateway({ configured: true, resolved: { auth: { apiKey: "k" } } });
+    gw[method] = () => { throw new Error("secret stale-context detail"); };
+    const result = await resolveQuotaAuth(gw, "openrouter", OFFICIAL);
+    assert.ok(result instanceof UsageError && result.kind === "auth", method);
+    assert.equal(result.message, "Credential resolution failed");
+  }
+});
+
+test("auth: session cancellation is preserved without exposing other gateway error details", async () => {
+  const gw = gateway({ configured: true });
+  const canceled = new UsageError("canceled", "Session changed; quota lookup canceled");
+  gw.resolveAuth = async () => { throw canceled; };
+  assert.equal(await resolveQuotaAuth(gw, "openrouter", OFFICIAL), canceled);
+  gw.resolveAuth = async () => { throw new UsageError("auth", "secret internal detail"); };
+  const result = await resolveQuotaAuth(gw, "openrouter", OFFICIAL);
+  assert.ok(result instanceof UsageError);
+  assert.equal(result.message, "Credential resolution failed");
+});
+
 test("auth: custom provider base URL is refused", async () => {
   const result = await resolveQuotaAuth(
     gateway({
@@ -665,6 +686,61 @@ test("monitor: obsolete results are discarded after shutdown", async () => {
     assert.equal(env.statusCalls.length, afterShutdown, "no status updates from disposed session");
   } finally {
     mock.timers.reset();
+  }
+});
+
+test("monitor: cache validation discards auth results from a replaced session", async () => {
+  const env = monitorEnv();
+  try {
+    env.monitor.startSession(env.session, "opencode-go");
+    await drain();
+    assert.ok(await env.monitor.serveCached("opencode-go"));
+    const gate = Promise.withResolvers<PiAuthResult>();
+    env.session.gateway.resolveAuth = () => gate.promise;
+    const cached = env.monitor.serveCached("opencode-go");
+    env.monitor.shutdown();
+    env.monitor.startSession(env.session, undefined);
+    gate.resolve({ auth: { apiKey: "key-1", baseUrl: "https://opencode-go.example" } });
+    assert.equal(await cached, undefined, "even valid auth overrides cannot revive old cache reads");
+  } finally {
+    env.monitor.shutdown();
+  }
+});
+
+test("monitor: shutdown during auth or coordination prevents late networking", async () => {
+  for (const stage of ["auth", "coordination"] as const) {
+    const gate = Promise.withResolvers<void>();
+    const shared = new FakeCoordination();
+    const env = monitorEnv({ coordination: shared });
+    if (stage === "auth") {
+      const resolveAuth = env.session.gateway.resolveAuth;
+      env.session.gateway.resolveAuth = async (id) => {
+        await gate.promise;
+        return resolveAuth(id);
+      };
+    } else {
+      const claim = shared.claim.bind(shared);
+      shared.claim = async (id, key) => {
+        await gate.promise;
+        return claim(id, key);
+      };
+    }
+    try {
+      env.monitor.startSession(env.session, "opencode-go");
+      await drain();
+      env.monitor.shutdown();
+      const statusCount = env.statusCalls.length;
+      gate.resolve();
+      await drain();
+      assert.equal(env.calls.length, 0, stage);
+      assert.equal(env.statusCalls.length, statusCount, "no disposed UI updates");
+      assert.equal(shared.claims, stage === "auth" ? 0 : 1);
+      assert.equal(shared.outcomes.length, stage === "auth" ? 0 : 1, "late lock is released");
+      assert.ok(shared.outcomes.every((outcome) => outcome === undefined), "no obsolete success/backoff recorded");
+    } finally {
+      gate.resolve();
+      env.monitor.shutdown();
+    }
   }
 });
 

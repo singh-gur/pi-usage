@@ -169,12 +169,13 @@ export class UsageMonitor {
    * account's result can never be exposed after a credential change.
    */
   async serveCached(providerId: string): Promise<ProviderUsage | undefined> {
+    const generation = this.generation;
     const session = this.session;
     const adapter = this.adapterById.get(providerId);
     const entry = this.cache.get(providerId);
     if (session === undefined || adapter === undefined || entry === undefined) return undefined;
     const auth = await resolveQuotaAuth(session.gateway, providerId, adapter.officialOrigin, adapter.allowedProviderOrigin, adapter.allowedOAuthOrigins);
-    if (auth instanceof UsageError) return undefined;
+    if (generation !== this.generation || auth instanceof UsageError) return undefined;
     if (this.fingerprintOf(auth.apiKey) !== entry.fingerprint) return undefined;
     return entry.usage;
   }
@@ -460,11 +461,18 @@ export class UsageMonitor {
         if (this.generation === generation && !callerGaveUp) this.noteFailure(adapterId, undefined);
         return errorUsage(adapter, auth, this.now());
       }
+      if (callerGaveUp || this.generation !== generation) {
+        return errorUsage(adapter, new UsageError("canceled", "Quota refresh canceled"), this.now());
+      }
       const fingerprint = this.fingerprintOf(auth.apiKey);
       try {
         shared = this.coordination ? await this.coordination.claim(adapterId, auth.apiKey) : undefined;
       } catch {
         shared = undefined;
+      }
+      if (callerGaveUp || this.generation !== generation) {
+        await shared?.release();
+        return errorUsage(adapter, new UsageError("canceled", "Quota refresh canceled"), this.now());
       }
       const refusal = this.sharedRefusal(adapterId, shared, trigger);
       if (refusal !== undefined) {
@@ -596,6 +604,7 @@ export class UsageMonitor {
   }
 
   private async renderFooter(): Promise<void> {
+    const generation = this.generation;
     const session = this.session;
     if (session === undefined || session.mode !== "tui") return;
     if (this.settings.footerFormat === "off" || isOffline()) {
@@ -610,6 +619,7 @@ export class UsageMonitor {
       return;
     }
     const cached = await this.serveCached(providerId);
+    if (generation !== this.generation || session !== this.session || providerId !== this.activeProviderId) return;
     if (cached !== undefined) {
       const error = this.lastError.get(providerId);
       session.setStatus(STATUS_KEY, formatFooterText(cached, {

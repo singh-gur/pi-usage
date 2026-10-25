@@ -54,13 +54,17 @@ function sessionFrom(ctx: {
     getProvider(id: string): unknown;
   };
   ui: { setStatus(key: string, text: string | undefined): void };
-}): MonitorSession {
+}, isActive: () => boolean): MonitorSession {
+  const registry = () => {
+    if (!isActive()) throw new UsageError("canceled", "Session changed; quota lookup canceled");
+    return ctx.modelRegistry;
+  };
   return {
     mode: ctx.mode,
     gateway: {
-      isConfigured: (id) => ctx.modelRegistry.getProviderAuthStatus(id).configured,
-      resolveAuth: (id) => ctx.modelRegistry.getProviderAuth(id) as never,
-      providerInfo: (id) => (ctx.modelRegistry.getProvider(id) ?? undefined) as never,
+      isConfigured: (id) => registry().getProviderAuthStatus(id).configured,
+      resolveAuth: (id) => registry().getProviderAuth(id) as never,
+      providerInfo: (id) => (registry().getProvider(id) ?? undefined) as never,
     } satisfies AuthGateway,
     setStatus: (key, text) => ctx.ui.setStatus(key, text),
   };
@@ -103,8 +107,9 @@ export default function (pi: ExtensionAPI) {
   // Keep both indicators in the package's single additive status section.
   const bindSession = (ctx: ExtensionContext): MonitorSession => {
     const generation = ++footerGeneration;
+    const epoch = sessionEpoch;
     return {
-      ...sessionFrom(ctx),
+      ...sessionFrom(ctx, () => epoch === sessionEpoch),
       notify: (message) => {
         if (usageOpen || generation !== footerGeneration || ctx.mode !== "tui") return false;
         ctx.ui.notify(message, "info");

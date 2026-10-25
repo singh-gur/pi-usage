@@ -91,9 +91,14 @@ for that account class. Custom enterprise hosts, token exchanges, and
 credential fallbacks are out of scope; if the token is rejected, stop and
 record the blocker instead of widening auth access.
 
-Target Pi v1 with `^1.1.0` peer/dev dependency ranges. Compatibility is
-inspected and synthetically tested against Pi 1.1.0; do not imply live provider
+Target Pi v1 with `^1.4.0` peer/dev dependency ranges. Compatibility is
+inspected and synthetically tested against Pi 1.4.0; do not imply live provider
 verification or independently verified support for other releases.
+Session shutdown invalidates bound auth gateways before old async work resumes.
+Keep every Pi auth/registry access inside fail-closed error handling; discard
+late auth/cache results and release late coordination claims without networking
+or updating disposed UI. Lifecycle tests must simulate stale context getters,
+not only late footer writes.
 
 README screenshots live in `assets/screenshots/` and depict real UI output
 with synthetic data, not live account verification. The README and `pi.image`

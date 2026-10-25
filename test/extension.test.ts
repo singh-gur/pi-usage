@@ -1229,9 +1229,20 @@ test("extension: late quota rendering cannot restore the combined status after s
   await harness.commands.get("usage-settings")!.handler("", ctx);
   assert.ok(release, "cached quota rendering is waiting on mocked auth resolution");
   await harness.events.get("session_shutdown")!({}, ctx);
+  let staleReads = 0;
+  Object.defineProperty(ctx, "modelRegistry", { get() {
+    staleReads++;
+    throw new Error("This extension ctx is stale after session replacement or reload");
+  } });
+  const replacement = makeCtx({ mode: "tui", entries: syntheticSessionEntries() });
+  await harness.events.get("session_start")!({}, replacement.ctx);
+  const replacementStatusCount = replacement.statusCalls.length;
   release();
   await settle();
+  assert.equal(staleReads, 0, "late auth must not access the replaced context");
   assert.deepEqual(statusCalls.at(-1), { key: "usage", text: undefined });
+  assert.equal(replacement.statusCalls.length, replacementStatusCount, "old footer cannot update the replacement");
+  await harness.events.get("session_shutdown")!({}, replacement.ctx);
 });
 
 test("extension: provider footer off leaves the independent cache-read percentage visible without networking", async () => {

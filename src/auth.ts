@@ -61,14 +61,21 @@ export async function resolveQuotaAuth(
   /** Additional exact origins accepted only for OAuth-provenance credentials (Copilot's account-specific routing). */
   allowedOAuthOrigins?: readonly string[],
 ): Promise<ResolvedQuotaAuth | UsageError> {
-  if (!gateway.isConfigured(providerId)) {
-    return new UsageError("not-configured", "No credentials configured for this provider");
-  }
   let resolved: PiAuthResult | undefined;
+  let effectiveBaseUrl: string | undefined;
   try {
+    if (!gateway.isConfigured(providerId)) {
+      return new UsageError("not-configured", "No credentials configured for this provider");
+    }
     resolved = await gateway.resolveAuth(providerId);
-  } catch {
-    return new UsageError("auth", "Credential resolution failed");
+    if (resolved?.auth.apiKey) {
+      // Revalidate routing after auth; the session may have changed while awaiting it.
+      effectiveBaseUrl = resolved.auth.baseUrl ?? gateway.providerInfo(providerId)?.baseUrl;
+    }
+  } catch (error) {
+    return error instanceof UsageError && error.kind === "canceled"
+      ? error
+      : new UsageError("auth", "Credential resolution failed");
   }
   if (!resolved) {
     return new UsageError("auth", "No usable credentials resolved for this provider");
@@ -80,7 +87,6 @@ export async function resolveQuotaAuth(
   const oauth = resolved.source === "OAuth";
   // Effective routing = auth-level base URL override, else composed provider base URL.
   const authOverride = resolved.auth.baseUrl;
-  const effectiveBaseUrl = authOverride ?? gateway.providerInfo(providerId)?.baseUrl;
   if (effectiveBaseUrl !== undefined) {
     const origin = originOf(effectiveBaseUrl);
     // Custom overrides must point at the official quota origin; without an
