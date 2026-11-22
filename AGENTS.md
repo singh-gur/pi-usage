@@ -91,9 +91,10 @@ for that account class. Custom enterprise hosts, token exchanges, and
 credential fallbacks are out of scope; if the token is rejected, stop and
 record the blocker instead of widening auth access.
 
-Target Pi v1 with `^1.4.0` peer/dev dependency ranges. Compatibility is
-inspected and synthetically tested against Pi 1.4.0; do not imply live provider
-verification or independently verified support for other releases.
+Target Pi v1 with `^1.4.0` peer dependency ranges (`devDependencies` track
+`^1.6.0`). Compatibility is inspected and synthetically tested against Pi
+1.6.0; do not imply live provider verification or independently verified support
+for other releases.
 Session shutdown invalidates bound auth gateways before old async work resumes.
 Keep every Pi auth/registry access inside fail-closed error handling; discard
 late auth/cache results and release late coordination claims without networking

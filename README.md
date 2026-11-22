@@ -24,7 +24,7 @@ Start Pi, or run `/reload` in an existing session. If your supported providers a
 
 Otherwise, run `/login` in Pi to configure a supported provider first. **Codex, Grok, GitHub Copilot, and Anthropic require subscription OAuth credentials**, not plain API keys. The extension uses the credentials Pi resolves—there is no second credential setup.
 
-Requires **Node.js ≥ 24.16** and **Pi ≥ 1.4.0 within v1**. Built and tested against the **Pi 1.4.0 public API** using synthetic data; other v1 releases have not been independently verified.
+Requires **Node.js ≥ 24.16** and **Pi ≥ 1.4.0 within v1**. Built and tested against the **Pi 1.6.0 public API** using synthetic data; other v1 releases have not been independently verified.
 
 <details>
 <summary>Try without a permanent install, install from Git, or update</summary>

@@ -50,9 +50,9 @@
     "pack:check": "pnpm pack --dry-run"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^1.4.0",
-    "@earendil-works/pi-tui": "^1.4.0",
-    "@types/node": "^26.6.5",
+    "@earendil-works/pi-coding-agent": "^1.6.0",
+    "@earendil-works/pi-tui": "^1.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   },
   "peerDependencies": {
