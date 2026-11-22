@@ -2,7 +2,7 @@
  * Bounded HTTP for quota reads and explicitly confirmed reset redemption.
  *
  * Safety invariants:
- * - GET reads; POST restricted to known reset routes. No URL credentials or redirects.
+ * - GET reads; POST restricted to allowlisted read-only quota RPCs or known reset routes. No URL credentials or redirects.
  * - 10s per request timeout, 128 KiB max body.
  * - Errors are sanitized: no raw upstream exception messages or bodies leak.
  */
@@ -85,6 +85,20 @@ export function parseRetryAfter(raw: string | null, now: number = Date.now()): n
  */
 export function createGetJson(limits: HttpLimits = DEFAULT_HTTP_LIMITS, signal?: AbortSignal): GetJson {
   return (url, headers) => requestJson(url, headers, "GET", undefined, limits, signal);
+}
+
+/** Read-only quota RPCs that require POST; strictly allowlisted to inspected routes. */
+const QUOTA_POST_URLS = new Set([
+  "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+  "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+]);
+
+export function createQuotaPostJson(limits: HttpLimits = DEFAULT_HTTP_LIMITS, signal?: AbortSignal): PostJson {
+  return async (url, headers, body) => {
+    validateUrl(url);
+    if (!QUOTA_POST_URLS.has(url)) throw new UsageError("request", "Refusing unknown quota POST endpoint");
+    return requestJson(url, { ...headers, "content-type": "application/json" }, "POST", JSON.stringify(body), limits, signal);
+  };
 }
 
 /** No generic mutation transport: only the two inspected redemption routes. */

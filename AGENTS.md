@@ -7,7 +7,7 @@ Repo-scoped rules for agents working in `pi-usage`. The global rules in
 
 `pi-usage` is an independently implemented Pi extension package
 that reports provider subscription quota (Codex, OpenCode Go, Z.ai, Kimi,
-Grok, GitHub Copilot, Anthropic) and OpenRouter key allowance through a `/usage` command
+Grok, GitHub Copilot, Anthropic, Antigravity) and OpenRouter key allowance through a `/usage` command
 and an additive footer indicator. Package settings are managed through
 `/usage-settings` and package-owned `pi-usage.json` files; project overrides
 must remain trust-gated.
@@ -90,6 +90,15 @@ support is not live-verified until the user reports a sanitized comparison
 for that account class. Custom enterprise hosts, token exchanges, and
 credential fallbacks are out of scope; if the token is rejected, stop and
 record the blocker instead of widening auth access.
+
+Antigravity (`antigravity`) reads shared subscription quota groups via
+allowlisted read-only POST (`createQuotaPostJson`) to
+`https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
+(fallback `https://cloudcode-pa.googleapis.com`) using the JSON-serialized
+OAuth credential exposed by `pi-antigravity` through Pi's public
+`modelRegistry` (no runtime dependency on `pi-antigravity`). Support is
+source-derived, not live-verified, requires OAuth credentials and a paid
+subscription, refuses custom base URLs, and has no reset action.
 
 Target Pi v1 with `^1.4.0` peer dependency ranges (`devDependencies` track
 `^1.6.0`). Compatibility is inspected and synthetically tested against Pi

@@ -22,7 +22,7 @@ Start Pi, or run `/reload` in an existing session. If your supported providers a
 /usage
 ```
 
-Otherwise, run `/login` in Pi to configure a supported provider first. **Codex, Grok, GitHub Copilot, and Anthropic require subscription OAuth credentials**, not plain API keys. The extension uses the credentials Pi resolves—there is no second credential setup.
+Otherwise, run `/login` in Pi to configure a supported provider first. **Codex, Grok, GitHub Copilot, Anthropic, and Antigravity require subscription OAuth credentials**, not plain API keys. The extension uses the credentials Pi resolves—there is no second credential setup.
 
 Requires **Node.js ≥ 24.16** and **Pi ≥ 1.4.0 within v1**. Built and tested against the **Pi 1.6.0 public API** using synthetic data; other v1 releases have not been independently verified.
 
@@ -124,6 +124,7 @@ Toggle **Cache read percentage** in `/usage-settings` independently of the provi
 | **Kimi Coding** · `kimi-coding` | Main allowance and rolling windows in provider allowance units—not model tokens. |
 | **Grok / xAI** · `xai` | Coding-credit allowance for the current weekly or monthly period—not all Grok chat quotas. |
 | **Anthropic** · `anthropic` | Claude Pro/Max plan windows (5-hour, 7-day, per-model weekly limits) and extra-usage spend when enabled. See the account-support caveat below. |
+| **Antigravity** · `antigravity` | Shared subscription quota pools (requires `pi-antigravity` OAuth login and a paid subscription). See the account-support caveat below. |
 | **GitHub Copilot** · `github-copilot` | Main allowance percentage for AI-credit or legacy premium-request billing. See the account-support caveat below. |
 | **OpenRouter** · `openrouter` | Current key spending cap, remaining dollars, and reported spending—not account-wide credit. |
 
@@ -133,6 +134,7 @@ Only configured supported providers get quota tabs. The Current session tab can 
 
 - **GitHub Copilot:** uses the undocumented `api.github.com/copilot_internal/user` endpoint with Pi’s resolved OAuth session token. Token acceptance and account-class support are **not live-verified**; a rejected token shows an auth error, with no credential fallback. Unlimited personal plans show `Unlimited`; organization-provided and unclassifiable accounts show `Organization-managed`, without an inferred balance. No request counts, currency totals, or organization-wide budgets are inferred. Pi’s official account-specific Copilot OAuth origins are accepted; custom enterprise hosts are not.
 - **Anthropic:** uses the undocumented `api.anthropic.com/api/oauth/usage` endpoint (the same source as Claude Code's own `/usage`) with Pi's resolved subscription OAuth token. Token acceptance is **not live-verified**; a rejected token shows an auth error, with no credential fallback. API-key spend outside the subscription is not covered: the Admin API cost reports require an Admin key that Pi does not resolve. Per-model weekly limits stay separate; unknown future limit kinds are skipped rather than mislabeled.
+- **Antigravity:** reads the undocumented `v1internal:retrieveUserQuotaSummary` RPC on `daily-cloudcode-pa.googleapis.com` (with fallback to `cloudcode-pa.googleapis.com`) using the OAuth credential resolved by `pi-antigravity` through Pi's public `modelRegistry`. Support is source-derived and **not live-verified**. Aggregate quota summary requires a paid subscription; free-tier accounts return a subscription error. Custom base URLs are refused, and there is no reset action.
 - **Grok free plans:** the billing response can look like a paid account with unused coding credits. The view may show a fully remaining weekly allowance even when model calls fail for lack of credits. It is not proof of a paid entitlement.
 - **OpenRouter:** an uncapped key does not mean unlimited account credit.
 - **All providers:** reset times are informational. A passed reset triggers a need for fresh data, not an assumption that quota has replenished. Missing or malformed values stay unknown; legitimate zeros stay zero.

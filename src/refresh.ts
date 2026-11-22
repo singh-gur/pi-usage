@@ -18,7 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AuthGateway } from "./auth.ts";
 import { resolveQuotaAuth } from "./auth.ts";
 import type { SharedClaim, SharedCoordination } from "./coordination.ts";
-import { bounded, createGetJson, createPostJson, DEFAULT_HTTP_LIMITS, isOffline, type GetJson, type PostJson } from "./http.ts";
+import { bounded, createGetJson, createPostJson, createQuotaPostJson, DEFAULT_HTTP_LIMITS, isOffline, type GetJson, type PostJson } from "./http.ts";
 import { attachResets, availableResetOffers, lowQuotaResetAvailable, resetInventoryWanted } from "./resets.ts";
 import { UsageError, type ProviderError, type ProviderUsage, type QuotaAdapter, type ResetOffer } from "./types.ts";
 import { DEFAULT_USAGE_SETTINGS, type ProviderUsageSettings, type UsageSettings } from "./settings.ts";
@@ -70,6 +70,7 @@ export interface UsageMonitorOptions {
   now?(): number;
   /** Injectable GET factory (tests); production uses the bounded HTTP layer. */
   createRequester?(signal: AbortSignal): GetJson;
+  createQuotaPostRequester?(signal: AbortSignal): PostJson;
   createResetRequester?(signal: AbortSignal): PostJson;
   settings?: UsageSettings;
   /** Cross-instance timing/backoff sharing; absent keeps per-instance behavior. */
@@ -101,6 +102,7 @@ export class UsageMonitor {
   private readonly adapterById = new Map<string, QuotaAdapter>();
   private readonly now: () => number;
   private readonly createRequester: (signal: AbortSignal) => GetJson;
+  private readonly createQuotaPostRequester: (signal: AbortSignal) => PostJson;
   private settings: UsageSettings;
   private readonly coordination: SharedCoordination | undefined;
   private readonly createResetRequester: (signal: AbortSignal) => PostJson;
@@ -127,6 +129,7 @@ export class UsageMonitor {
     for (const adapter of options.adapters) this.adapterById.set(adapter.id, adapter);
     this.now = options.now ?? (() => Date.now());
     this.createRequester = options.createRequester ?? ((signal) => createGetJson(DEFAULT_HTTP_LIMITS, signal));
+    this.createQuotaPostRequester = options.createQuotaPostRequester ?? ((signal) => createQuotaPostJson(DEFAULT_HTTP_LIMITS, signal));
     this.settings = options.settings ?? { ...DEFAULT_USAGE_SETTINGS };
     this.coordination = options.coordination;
     this.createResetRequester = options.createResetRequester ?? ((signal) => createPostJson(DEFAULT_HTTP_LIMITS, signal));
@@ -489,7 +492,8 @@ export class UsageMonitor {
       // Capture server retry guidance from non-2xx responses without
       // touching adapter contracts.
       let retryAfterMs: number | undefined;
-      const getJsonBase = this.createRequester(this.ensureController().signal);
+      const signal = this.ensureController().signal;
+      const getJsonBase = this.createRequester(signal);
       const getJson: GetJson = async (url, headers) => {
         const response = await getJsonBase(url, headers);
         if ((response.status < 200 || response.status >= 300) && response.retryAfterMs !== undefined) {
@@ -497,8 +501,16 @@ export class UsageMonitor {
         }
         return response;
       };
+      const postJsonBase = this.createQuotaPostRequester(signal);
+      const postJson: PostJson = async (url, headers, body) => {
+        const response = await postJsonBase(url, headers, body);
+        if ((response.status < 200 || response.status >= 300) && response.retryAfterMs !== undefined) {
+          retryAfterMs = response.retryAfterMs;
+        }
+        return response;
+      };
       try {
-        const quota = await adapter.fetchQuota(auth, getJson);
+        const quota = await adapter.fetchQuota(auth, getJson, postJson);
         // Automatic refreshes skip the second (inventory) request unless the
         // low-quota notice could use it; /usage always gets it.
         const usage = trigger === "command" || resetInventoryWanted(quota, this.settings.resetThresholdPercent, this.now())

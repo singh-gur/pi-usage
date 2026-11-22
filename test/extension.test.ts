@@ -631,6 +631,20 @@ const EIGHT_PROVIDER_BODIES = {
       }),
       { status: 200 },
     ),
+  "daily-cloudcode-pa.googleapis.com": () =>
+    new Response(
+      JSON.stringify({
+        groups: [
+          {
+            displayName: "Gemini",
+            buckets: [
+              { displayName: "5-hour", remainingFraction: 0.72, resetTime: new Date(Date.now() + 3_600_000).toISOString() },
+            ],
+          },
+        ],
+      }),
+      { status: 200 },
+    ),
 };
 
 const ALL_CONFIGURED = {
@@ -642,9 +656,10 @@ const ALL_CONFIGURED = {
   xai: true,
   "github-copilot": true,
   anthropic: true,
+  antigravity: true,
 };
 
-test("extension: eight providers render independently without conflation", async () => {
+test("extension: nine providers render independently without conflation", async () => {
   const harness = setupExtension();
   installFetch(EIGHT_PROVIDER_BODIES, harness.fetchCalls);
   const { ctx, handles } = makeCtx({
@@ -659,9 +674,13 @@ test("extension: eight providers render independently without conflation", async
       xai: "grok-oauth-token",
       "github-copilot": "ghu-session-token",
       anthropic: "sk-ant-oauth",
+      antigravity: JSON.stringify({ token: "ya29.ag-token", projectId: "proj-1" }),
     },
-    oauthByKey: { "openai-codex": true, xai: true, "github-copilot": true, anthropic: true },
-    authBaseUrl: { "github-copilot": "https://api.business.githubcopilot.com" },
+    oauthByKey: { "openai-codex": true, xai: true, "github-copilot": true, anthropic: true, antigravity: true },
+    authBaseUrl: {
+      "github-copilot": "https://api.business.githubcopilot.com",
+      antigravity: "https://daily-cloudcode-pa.googleapis.com",
+    },
   });
 
   const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
@@ -706,6 +725,12 @@ test("extension: eight providers render independently without conflation", async
   assert.ok(lines.includes("Claude subscription allowance"));
   assert.ok(/5-hour/.test(lines) && /58% left/.test(lines));
 
+  handles[0]!.component.handleInput("\x1b[C"); // Antigravity
+  lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(lines.includes("[Antigravity]"));
+  assert.ok(lines.includes("Antigravity subscription allowance"));
+  assert.ok(/Gemini · 5-hour/.test(lines) && /72% left/.test(lines));
+
   // Grok: identity ran before billing and carried the verified user id.
   const grokCalls = harness.fetchCalls.filter((c) => c.url.includes("cli-chat-proxy.grok.com"));
   assert.ok(grokCalls.length >= 2);
@@ -735,6 +760,35 @@ test("extension: eight providers render independently without conflation", async
   assert.ok(anthropicCall, "anthropic quota request issued");
   assert.equal(anthropicCall!.headers.authorization, "Bearer sk-ant-oauth");
   assert.equal(anthropicCall!.headers["anthropic-beta"], "oauth-2025-04-20");
+
+  // Antigravity request posted to the quota summary RPC with the parsed OAuth token.
+  const antigravityCall = harness.fetchCalls.find(
+    (c) => c.url === "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+  );
+  assert.ok(antigravityCall, "antigravity quota request issued");
+  assert.equal(antigravityCall!.headers.authorization, "Bearer ya29.ag-token");
+  assert.equal(antigravityCall!.headers["content-type"], "application/json");
+
+  handles[0]!.done(undefined);
+  await handlerPromise;
+});
+
+test("extension: antigravity OAuth routing through an undeclared origin is refused", async () => {
+  const harness = setupExtension();
+  installFetch({ "daily-cloudcode-pa.googleapis.com": () => new Response("{}", { status: 200 }) }, harness.fetchCalls);
+  const { ctx, handles } = makeCtx({
+    mode: "tui",
+    configured: { antigravity: true },
+    authByKey: { antigravity: JSON.stringify({ token: "ya29.ag-token", projectId: "proj-1" }) },
+    oauthByKey: { antigravity: true },
+    authBaseUrl: { antigravity: "https://daily-cloudcode-pa.googleapis.com.evil.com" },
+  });
+
+  const handlerPromise = harness.commands.get("usage")!.handler("", ctx);
+  await settle();
+  const lines = handles[0]!.component.render(100).join("\n");
+  assert.ok(/auth: Provider routes through a custom base URL; quota lookup refused/.test(lines));
+  assert.equal(harness.fetchCalls.length, 0, "credentials never leave the process");
 
   handles[0]!.done(undefined);
   await handlerPromise;

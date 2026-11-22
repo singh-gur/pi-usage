@@ -6,6 +6,11 @@ import { codexAccountId, interpretCodex, codexAdapter } from "../src/providers/c
 import { interpretKimi, kimiAdapter } from "../src/providers/kimi.ts";
 import { interpretZai, zaiAdapter } from "../src/providers/zai.ts";
 import { anthropicAdapter, interpretAnthropic } from "../src/providers/anthropic.ts";
+import {
+  antigravityAdapter,
+  extractAntigravityToken,
+  interpretAntigravity,
+} from "../src/providers/antigravity.ts";
 import { UsageError } from "../src/types.ts";
 
 const NOW = 1_700_000_000_000;
@@ -1083,6 +1088,184 @@ test("anthropic: non-OAuth resolution is rejected without a request", async () =
   };
   const error = await anthropicAdapter
     .fetchQuota({ apiKey: "sk-ant-api-key", oauth: false }, getJson)
+    .catch((e) => e);
+  assert.ok(error instanceof UsageError && error.kind === "auth");
+  assert.equal(requests, 0);
+});
+
+// --------------------------------------------------------------- Antigravity
+
+const ANTIGRAVITY_KEY = JSON.stringify({ token: "ya29.antigravity-token", projectId: "proj-1" });
+
+function antigravityPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    groups: [
+      {
+        displayName: "Gemini",
+        buckets: [
+          { bucketId: "gemini-5h", displayName: "5-hour", remainingFraction: 0.7, resetTime: ISO },
+          { bucketId: "gemini-7d", displayName: "Weekly", remainingFraction: 0.855, resetTime: ISO },
+        ],
+      },
+      {
+        displayName: "Claude & GPT",
+        buckets: [
+          { bucketId: "claude-5h", displayName: "5-hour", remainingFraction: 0, resetTime: ISO },
+        ],
+      },
+    ],
+    ...overrides,
+  };
+}
+
+test("antigravity: extracts bearer token from pi-antigravity JSON credentials without leaking raw input", () => {
+  assert.equal(extractAntigravityToken(ANTIGRAVITY_KEY), "ya29.antigravity-token");
+  for (const bad of ["not-json-secret-123", "{}", JSON.stringify({ token: "" }), JSON.stringify({ token: "bad token" })]) {
+    const error = expectError("auth", () => extractAntigravityToken(bad));
+    assert.ok(!error.message.includes("secret-123"));
+  }
+});
+
+test("antigravity: maps quota groups and buckets to consumed percentages with reset times", () => {
+  const result = interpretAntigravity(200, antigravityPayload(), NOW);
+  assert.equal(result.providerId, "antigravity");
+  assert.equal(result.providerName, "Antigravity");
+  assert.equal(result.domainLabel, "Antigravity subscription allowance");
+  assert.equal(result.windows.length, 3);
+  assert.equal(result.windows[0]!.label, "Gemini · 5-hour");
+  assert.equal(result.windows[0]!.usedPercent, 30);
+  assert.equal(result.windows[0]!.resetsAt, Date.parse(ISO));
+  assert.equal(result.windows[1]!.label, "Gemini · Weekly");
+  assert.equal(result.windows[1]!.usedPercent, 14.5);
+  assert.equal(result.windows[2]!.label, "Claude & GPT · 5-hour");
+  assert.equal(result.windows[2]!.usedPercent, 100);
+  assert.equal(result.partialNotice, undefined);
+});
+
+test("antigravity: preserves 0% consumed and sanitizes control characters in labels", () => {
+  const result = interpretAntigravity(
+    200,
+    {
+      groups: [
+        {
+          displayName: "Pool\x1b[31m",
+          buckets: [{ displayName: "Pool\x1b[31m", remainingFraction: 1, resetTime: ISO }],
+        },
+      ],
+    },
+    NOW,
+  );
+  assert.equal(result.windows[0]!.label, "Pool[31m");
+  assert.equal(result.windows[0]!.usedPercent, 0);
+});
+
+test("antigravity: present-but-invalid remainingFraction drops the bucket with partial notice, never zero", () => {
+  const result = interpretAntigravity(
+    200,
+    {
+      groups: [
+        {
+          displayName: "Gemini",
+          buckets: [
+            { displayName: "5-hour", remainingFraction: 0.5, resetTime: ISO },
+            { displayName: "Bad", remainingFraction: 1.5, resetTime: ISO },
+            { displayName: "NaN", remainingFraction: "nope" },
+          ],
+        },
+      ],
+    },
+    NOW,
+  );
+  assert.equal(result.windows.length, 1);
+  assert.equal(result.windows[0]!.usedPercent, 50);
+  assert.match(result.partialNotice ?? "", /2 quota window/);
+});
+
+test("antigravity: empty or unusable payloads are unsupported", () => {
+  expectError("unsupported", () => interpretAntigravity(200, null, NOW));
+  expectError("unsupported", () => interpretAntigravity(200, {}, NOW));
+  expectError("unsupported", () => interpretAntigravity(200, { groups: [] }, NOW));
+  expectError("unsupported", () => interpretAntigravity(200, { groups: [{ displayName: "G", buckets: [{ remainingFraction: -0.1 }] }] }, NOW));
+});
+
+test("antigravity: status errors map 401 auth, 403 subscription vs auth, and other statuses to request", () => {
+  expectError("auth", () => interpretAntigravity(401, null, NOW));
+  const sub = expectError("subscription", () =>
+    interpretAntigravity(403, { error: { message: "SUBSCRIPTION_REQUIRED (#3501)" } }, NOW),
+  );
+  assert.match(sub.message, /paid subscription/);
+  const denied = expectError("auth", () => interpretAntigravity(403, { error: { message: "forbidden" } }, NOW));
+  assert.equal(denied.message, "Access to Antigravity usage was denied");
+  expectError("request", () => interpretAntigravity(503, null, NOW));
+});
+
+test("antigravity: adapter posts empty JSON body with bearer token and falls back to secondary endpoint", async () => {
+  const calls: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
+  const postJson = async (url: string, headers: Record<string, string>, body: unknown) => {
+    calls.push({ url, headers, body });
+    if (calls.length === 1) return { status: 503, data: null };
+    return { status: 200, data: antigravityPayload() };
+  };
+  const result = await antigravityAdapter.fetchQuota(
+    { apiKey: ANTIGRAVITY_KEY, oauth: true },
+    async () => { throw new Error("GET should not be called"); },
+    postJson,
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]!.url, "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary");
+  assert.equal(calls[1]!.url, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary");
+  assert.equal(calls[0]!.headers.authorization, "Bearer ya29.antigravity-token");
+  assert.match(calls[0]!.headers["user-agent"] ?? "", /^antigravity\/cli\//);
+  assert.deepEqual(calls[0]!.body, {});
+  assert.equal(result.providerId, "antigravity");
+});
+
+test("antigravity: adapter does not retry secondary endpoint on 401, subscription 403, or cancel", async () => {
+  for (const response of [
+    { status: 401, data: null, expected: "auth" },
+    { status: 403, data: { error: { message: "SUBSCRIPTION_REQUIRED" } }, expected: "subscription" },
+  ]) {
+    let calls = 0;
+    const error = await antigravityAdapter
+      .fetchQuota(
+        { apiKey: ANTIGRAVITY_KEY, oauth: true },
+        async () => ({ status: 200, data: null }),
+        async () => {
+          calls++;
+          return { status: response.status, data: response.data };
+        },
+      )
+      .catch((e) => e);
+    assert.ok(error instanceof UsageError && error.kind === response.expected);
+    assert.equal(calls, 1);
+  }
+
+  let canceledCalls = 0;
+  const canceled = await antigravityAdapter
+    .fetchQuota(
+      { apiKey: ANTIGRAVITY_KEY, oauth: true },
+      async () => ({ status: 200, data: null }),
+      async () => {
+        canceledCalls++;
+        throw new UsageError("canceled", "Request canceled");
+      },
+    )
+    .catch((e) => e);
+  assert.ok(canceled instanceof UsageError && canceled.kind === "canceled");
+  assert.equal(canceledCalls, 1);
+});
+
+test("antigravity: non-OAuth resolution is rejected without a request", async () => {
+  let requests = 0;
+  const error = await antigravityAdapter
+    .fetchQuota(
+      { apiKey: ANTIGRAVITY_KEY, oauth: false },
+      async () => ({ status: 200, data: null }),
+      async () => {
+        requests++;
+        return { status: 200, data: antigravityPayload() };
+      },
+    )
     .catch((e) => e);
   assert.ok(error instanceof UsageError && error.kind === "auth");
   assert.equal(requests, 0);

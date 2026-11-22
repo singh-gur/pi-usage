@@ -33,6 +33,7 @@
     "grok",
     "github-copilot",
     "anthropic",
+    "antigravity",
     "openrouter"
   ],
   "files": [

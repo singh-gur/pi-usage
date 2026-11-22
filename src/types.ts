@@ -86,10 +86,16 @@ export interface ProviderUsage {
   error?: ProviderError;
 }
 
-/** Structural shape of the bounded HTTP function adapters use. */
+/** Structural shape of the bounded HTTP functions adapters use. */
 export type QuotaRequester = (
   url: string,
   headers: Record<string, string>,
+) => Promise<{ status: number; data: unknown }>;
+
+export type QuotaPostRequester = (
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
 ) => Promise<{ status: number; data: unknown }>;
 
 /** Credentials resolved by the auth layer and handed to an adapter. */
@@ -119,7 +125,7 @@ export interface QuotaAdapter {
   domainLabel: string;
   /** Provider-specific cap on automatic failure backoff; defaults to the monitor's 5 min. */
   maxBackoffMs?: number;
-  fetchQuota(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ProviderUsage>;
+  fetchQuota(auth: QuotaFetchAuth, getJson: QuotaRequester, postJson?: QuotaPostRequester): Promise<ProviderUsage>;
   fetchResets?(auth: QuotaFetchAuth, getJson: QuotaRequester): Promise<ResetAvailability>;
   redeemReset?(auth: QuotaFetchAuth, offer: ResetOffer, getJson: QuotaRequester,
     postJson: (url: string, headers: Record<string, string>, body: unknown) => Promise<{ status: number; data: unknown }>,

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveQuotaAuth, type AuthGateway, type PiAuthResult } from "../src/auth.ts";
-import { bounded, createGetJson, isOffline } from "../src/http.ts";
+import { bounded, createGetJson, createQuotaPostJson, isOffline } from "../src/http.ts";
 import { UsageError, parseResetTime } from "../src/types.ts";
 
 function gateway(setup: {
@@ -323,6 +323,32 @@ test("http: outer signal abort maps to canceled", async () => {
   controller.abort();
   const error = await pending.catch((e) => e);
   assert.ok(error instanceof UsageError && error.kind === "canceled");
+});
+
+test("http: quota POST transport only accepts allowlisted read-only RPCs", async () => {
+  const calls = installFetch(() => new Response(JSON.stringify({ groups: [] }), { status: 200 }));
+  const postJson = createQuotaPostJson();
+  await expectReject("request", postJson("https://example.com/v1internal:retrieveUserQuotaSummary", {}, {}));
+  await expectReject("request", postJson("https://daily-cloudcode-pa.googleapis.com/v1internal:other", {}, {}));
+  assert.equal(calls.length, 0);
+
+  const primary = await postJson(
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    { authorization: "Bearer t" },
+    {},
+  );
+  assert.equal(primary.status, 200);
+  assert.equal(calls[0]!.opts.method, "POST");
+  assert.equal(calls[0]!.opts.redirect, "error");
+  assert.equal(calls[0]!.headers["content-type"], "application/json");
+
+  const fallback = await postJson(
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    { authorization: "Bearer t" },
+    {},
+  );
+  assert.equal(fallback.status, 200);
+  assert.equal(calls.length, 2);
 });
 
 // ------------------------------------------------------------- bounds & misc
